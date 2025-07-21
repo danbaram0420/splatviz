@@ -69,7 +69,7 @@ class Splatviz(imgui_window.ImguiWindow):
             initial_files[1:] = sorted(initial_files[1:])
 
         self.widgets = []
-        update_all_the_time = False
+        update_all_the_time = True
         if mode == "default":
             # Pass initial_files to LoadWidget if provided
             self.widgets = [
