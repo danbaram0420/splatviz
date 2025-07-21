@@ -1,0 +1,50 @@
+add_background_sphere: false
+background_sphere_center: points
+background_sphere_distance: 2.2
+background_sphere_points: 204800
+camera_on_cpu: false
+distributed: false
+image_on_cpu: true
+image_scale_factor: 1.0
+initialize_from: ../exp_res/cube_high
+n_feature_dims: 32
+num_sampled_rays: 1000
+num_workers: 2
+optimization: !!python/object:internal.configs.segany_splatting.Optimization
+  lr: 0.0025
+  lr_final_factor: 1.0
+output_path: ../exp_res/cube_high/seganygs
+parser: !!python/object:internal.dataparsers.segany_colmap_dataparser.SegAnyColmap
+  appearance_groups: null
+  down_sample_factor: 1
+  down_sample_rounding_mode: round
+  eval_image_select_mode: step
+  eval_ratio: 0.01
+  eval_step: 8
+  image_dir: null
+  image_list: null
+  mask_dir: null
+  n_random_points: 100000
+  points_from: sfm
+  reorient: false
+  scene_scale: 1.0
+  semantic_mask_dir: semantic/masks
+  semantic_scale_dir: semantic/scales
+  split_mode: reconstruction
+path: ../dataset/cube_high
+ray_sample_rate: 0
+rfn: 1.0
+save_iterations:
+- 7000
+- 30000
+save_val_output: false
+scale_aware_dim: -1
+sh_degree: -1
+smooth_K: 16
+smooth_dropout: 0.5
+test_max_num_images_to_cache: -1
+train_max_num_images_to_cache: -1
+undistort_image: false
+val_max_num_images_to_cache: -1
+val_on_train: false
+web_viewer: true

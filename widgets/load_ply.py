@@ -7,14 +7,25 @@ from widgets.widget import Widget
 
 
 class LoadWidget(Widget):
-    def __init__(self, viz, root):
+    def __init__(self, viz, root, initial_files=None):
         super().__init__(viz, "Load")
         self.root = root
         self.filter = ""
-        self.items = self.list_runs_and_pkls()
-        if len(self.items) == 0:
-            raise FileNotFoundError(f"No .ply or compression_config.yml found in '{root}' with filter 'f{self.filter}'")
-        self.plys: list[str] = [self.items[0]]
+        # If an initial file list is provided (scene + objects), use that.
+        if initial_files is not None:
+            # Use provided list as available items
+            self.items = [os.path.abspath(path) for path in initial_files]
+            if len(self.items) == 0:
+                raise FileNotFoundError("No .ply files provided in initial_files!")
+            # Set all initial files to be loaded
+            self.plys: list[str] = list(self.items)
+        else:
+            # Original behavior: scan directory for .ply files
+            self.items = self.list_runs_and_pkls()
+            if len(self.items) == 0:
+                raise FileNotFoundError(
+                    f"No .ply or compression_config.yml found in '{root}' with filter '{self.filter}'")
+            self.plys: list[str] = [self.items[0]]
         self.use_splitscreen = False
         self.highlight_border = False
 

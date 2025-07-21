@@ -2,6 +2,7 @@ from imgui_bundle import imgui
 import numpy as np
 import torch
 import sys
+import os
 
 sys.path.append("./gaussian-splatting")
 torch.set_printoptions(precision=2, sci_mode=False)
@@ -33,7 +34,7 @@ from widgets import (
 
 
 class Splatviz(imgui_window.ImguiWindow):
-    def __init__(self, data_path, mode, host, port, gan_path=""):
+    def __init__(self, data_path, mode, host, port, gan_path="", scene_path="", objects_path=""):
         self.code_font_path = "resources/fonts/jetbrainsmono/JetBrainsMono-Regular.ttf"
         self.regular_font_path = "resources/fonts/source_sans_pro/SourceSansPro-Regular.otf"
 
@@ -52,11 +53,27 @@ class Splatviz(imgui_window.ImguiWindow):
         # Internals.
         self._last_error_print = None
 
+        # Determine initial files to load
+        initial_files = None
+        if scene_path:
+            initial_files = []
+            # Always include the scene .ply first
+            initial_files.append(os.path.abspath(scene_path))
+            # Include all .ply files from the objects directory
+            if objects_path:
+                for fname in os.listdir(objects_path):
+                    if fname.endswith(".ply"):
+                        initial_files.append(os.path.abspath(os.path.join(objects_path, fname)))
+            # Sort object files for consistent order (scene is index 0, objects 1..N)
+            # (If a specific order is needed, the user can name files accordingly)
+            initial_files[1:] = sorted(initial_files[1:])
+
         self.widgets = []
         update_all_the_time = False
         if mode == "default":
+            # Pass initial_files to LoadWidget if provided
             self.widgets = [
-                load_ply.LoadWidget(self, data_path),
+                load_ply.LoadWidget(self, data_path, initial_files=initial_files),
                 camera.CamWidget(self),
                 performance.PerformanceWidget(self),
                 save.CaptureWidget(self),
@@ -101,6 +118,14 @@ class Splatviz(imgui_window.ImguiWindow):
         self.result = EasyDict()
         self.eval_result = ""
 
+        # After initializing widgets and renderer...
+        # Initialize transform list for each loaded scene/object
+        num_initial = len(self.widgets[0].plys)
+        # Each transform is stored as (quat, trans), quat=[1,0,0,0] (w,x,y,z), trans=[0,0,0] initially
+        identity_quat = torch.tensor([1.0, 0.0, 0.0, 0.0], dtype=torch.float32, device="cuda")
+        identity_trans = torch.tensor([0.0, 0.0, 0.0], dtype=torch.float32, device="cuda")
+        self.object_transforms = [(identity_quat, identity_trans) for _ in range(num_initial)]
+
         # Initialize window.
         self.set_position(0, 0)
         self._adjust_font_size()
@@ -130,6 +155,20 @@ class Splatviz(imgui_window.ImguiWindow):
         self.label_w = round(self.font_size * 5.5) + 100
         self.label_w_large = round(self.font_size * 5.5) + 150
 
+    def set_transform(self, object_idx: int, quat: tuple[float, float, float, float],
+                      trans: tuple[float, float, float]) -> None:
+        """Update the rotation (quat) and translation for a given object index."""
+        if object_idx < 0 or object_idx >= len(self.object_transforms):
+            print(f"set_transform: invalid object index {object_idx}")
+            return
+        # Convert quaternion and translation to torch tensors (on GPU)
+        # Expect quat in (w,x,y,z) format
+        q = torch.tensor(quat, dtype=torch.float32, device="cuda")
+        t = torch.tensor(trans, dtype=torch.float32, device="cuda")
+        # Normalize quaternion to be safe
+        q = q / torch.norm(q)
+        self.object_transforms[object_idx] = (q, t)
+
     def draw_frame(self):
         self.begin_frame()
         self.args = EasyDict()
@@ -149,6 +188,30 @@ class Splatviz(imgui_window.ImguiWindow):
             imgui.unindent()
 
         # imgui.show_style_editor()
+
+        # **Sync transform list with current number of objects**
+        current_files = self.widgets[0].plys
+        # Build a map of old file->transform
+        prev_map = {}
+        if hasattr(self, "object_transforms"):
+            prev_files = getattr(self.widgets[0], "prev_plys", None) or current_files
+            for j, fname in enumerate(prev_files):
+                if j < len(self.object_transforms):
+                    prev_map[fname] = self.object_transforms[j]
+        # Update prev_plys for next frame
+        self.widgets[0].prev_plys = list(current_files)
+        # Rebuild object_transforms for current list
+        new_transforms = []
+        for fname in current_files:
+            if fname in prev_map:
+                new_transforms.append(prev_map[fname])
+            else:
+                # New file (added) -> default identity transform
+                new_transforms.append((identity_quat.clone(), identity_trans.clone()))
+        self.object_transforms = new_transforms
+
+        # Pass transforms to renderer via args
+        self.args.object_transforms = self.object_transforms
 
         # Render
         if self.is_skipping_frames():

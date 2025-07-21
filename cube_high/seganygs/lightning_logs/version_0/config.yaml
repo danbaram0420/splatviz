@@ -1,0 +1,114 @@
+# lightning.pytorch==2.0.0
+seed_everything: 42
+trainer:
+  accelerator: gpu
+  strategy: auto
+  devices: 1
+  num_nodes: 1
+  precision: 32-true
+  logger:
+    class_path: lightning.pytorch.loggers.TensorBoardLogger
+    init_args:
+      save_dir: ../exp_res/cube_high/seganygs
+  callbacks: null
+  fast_dev_run: false
+  max_epochs: null
+  min_epochs: null
+  max_steps: 10000
+  min_steps: null
+  max_time: null
+  limit_train_batches: null
+  limit_val_batches: null
+  limit_test_batches: null
+  limit_predict_batches: null
+  overfit_batches: 0.0
+  val_check_interval: null
+  check_val_every_n_epoch: 1
+  num_sanity_val_steps: 1
+  log_every_n_steps: null
+  enable_checkpointing: false
+  enable_progress_bar: null
+  enable_model_summary: null
+  accumulate_grad_batches: 1
+  gradient_clip_val: null
+  gradient_clip_algorithm: null
+  deterministic: null
+  benchmark: null
+  inference_mode: true
+  use_distributed_sampler: false
+  profiler: null
+  detect_anomaly: false
+  barebones: false
+  plugins: null
+  sync_batchnorm: false
+  reload_dataloaders_every_n_epochs: 0
+  default_root_dir: null
+model:
+  initialize_from: ../exp_res/cube_high
+  optimization:
+    lr: 0.0025
+    lr_final_factor: 1.0
+  n_feature_dims: 32
+  scale_aware_dim: -1
+  ray_sample_rate: 0
+  num_sampled_rays: 1000
+  smooth_K: 16
+  smooth_dropout: 0.5
+  rfn: 1.0
+  output_path: ../exp_res/cube_high/seganygs
+  sh_degree: -1
+  web_viewer: true
+  save_val_output: false
+data:
+  path: ../dataset/cube_high
+  parser:
+    class_path: internal.dataparsers.SegAnyColmap
+    init_args:
+      image_dir: null
+      mask_dir: null
+      split_mode: reconstruction
+      eval_image_select_mode: step
+      eval_step: 8
+      eval_ratio: 0.01
+      scene_scale: 1.0
+      reorient: false
+      appearance_groups: null
+      image_list: null
+      down_sample_factor: 1
+      down_sample_rounding_mode: round
+      points_from: sfm
+      n_random_points: 100000
+      semantic_mask_dir: semantic/masks
+      semantic_scale_dir: semantic/scales
+  distributed: false
+  undistort_image: false
+  val_on_train: false
+  image_scale_factor: 1.0
+  train_max_num_images_to_cache: -1
+  val_max_num_images_to_cache: -1
+  test_max_num_images_to_cache: -1
+  num_workers: 2
+  add_background_sphere: false
+  background_sphere_center: points
+  background_sphere_distance: 2.2
+  background_sphere_points: 204800
+  camera_on_cpu: false
+  image_on_cpu: true
+max_steps: 10000
+max_epochs: null
+name: ../exp_res/cube_high
+version: seganygs
+save_iterations:
+- 7000
+- 30000
+logger: tensorboard
+project: Gaussian-Splatting
+output: ''
+float32_matmul_precision: null
+viewer: true
+save_val: false
+val_train: false
+cache_all_images: false
+optimizer: null
+lr_scheduler: null
+ckpt_path: null

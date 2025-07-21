@@ -1,0 +1,1 @@
+Namespace(sh_degree=3, source_path='/home/media/바탕화면/workspace/DecoupledGaussian/organize_code/dataset/cube_high', model_path='./exp_res/cube_high', images='images', resolution=-1, white_background=False, data_device='cuda', eval=False, preload_img=True, ncc_scale=1.0, multi_view_num=8, multi_view_max_angle=30, multi_view_min_dis=0.01, multi_view_max_dis=1.5)
