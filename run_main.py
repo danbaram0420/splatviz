@@ -7,6 +7,40 @@ import time
 import trimesh, numpy as np, pybullet as p, math, os, pybullet_data
 from pybullet_utils import bullet_client
 from trimesh.transformations import quaternion_from_matrix
+from scipy.spatial.transform import Rotation as R
+
+R_cs   = R.from_euler('x',  +90, degrees=True).as_matrix()
+R_fix  = R.from_euler('x', -210, degrees=True).as_matrix()   # 210° 보정
+R_obj  = R.from_euler('x',  -90, degrees=True).as_matrix()   # 내장 +90°
+R_corr = R_fix @ R_obj
+
+# ★ object 전용:  mesh → COM 오프셋 & 회전 (생성 때 쓴 값)                  # (x,y,z) in mesh local
+     # mesh → Inertial
+def bullet_to_splatviz(pos_pb, quat_pb_xyzw, com, quat_I, is_object=False):
+    """PyBullet  →  Splatviz"""
+    R_pb  = R.from_quat(quat_pb_xyzw).as_matrix()
+
+    # --- 위치 변환 -------------------------------------------------------
+    if is_object:
+        # 월드-메시원점 = 월드-COM – R_pb·COM_L
+        pos_world_mesh = np.asarray(pos_pb) - R_pb @ com
+        R_LI = R.from_quat(quat_I).as_matrix()
+    else:          # scene 은 inertial offset이 없음
+        pos_world_mesh = np.asarray(pos_pb)
+
+    pos_sv = R_cs @ pos_world_mesh          # Z-up→-Y-up
+
+    # --- 회전 변환 -------------------------------------------------------
+    if is_object:
+        R_world_mesh = R_pb @ R_LI.T        # inertial 보정
+    else:
+        R_world_mesh = R_pb
+
+    R_sv  = R_cs @ (R_world_mesh @ R_corr)
+    quat_sv = R.from_matrix(R_sv).as_quat()   # (x,y,z,w)
+    quat_sv = (quat_sv[3], *quat_sv[:3])      # (w,x,y,z)
+
+    return tuple(pos_sv), tuple(quat_sv)
 
 @click.command()
 @click.option("--data_path", default="./resources/sample_scenes", help="root path for .ply files", metavar="PATH")
@@ -28,7 +62,7 @@ def main(data_path, scene_path, objects_path, mode, host, port, gan_path):
     p.configureDebugVisualizer(p.COV_ENABLE_SHADOWS, 1)
     p.configureDebugVisualizer(p.COV_ENABLE_WIREFRAME, 0)
 
-    quat = p.getQuaternionFromEuler([math.radians(-150), 0, 0])
+    quat = p.getQuaternionFromEuler([math.radians(210), 0, 0])
 
     p.setPhysicsEngineParameter(
         numSolverIterations=150,
@@ -87,7 +121,7 @@ def main(data_path, scene_path, objects_path, mode, host, port, gan_path):
         baseMass=2.0,  # 질량 [kg]
         baseCollisionShapeIndex=obj_col,
         baseVisualShapeIndex=obj_vis,
-        basePosition=[0, 0, 10],  # 월드 좌표
+        basePosition=[0, 0, 0],  # 월드 좌표
         baseOrientation=quat,
         baseInertialFramePosition=initialPos,  # ★ CoM
         baseInertialFrameOrientation=quat_I,
@@ -106,12 +140,19 @@ def main(data_path, scene_path, objects_path, mode, host, port, gan_path):
                              scene_path=scene_path, objects_path=objects_path)
     else:
         splatviz = Splatviz(data_path=data_path, mode=mode, host=host, port=port)
+
+
     while not splatviz.should_close():
         p.stepSimulation()
         spos, squat = p.getBasePositionAndOrientation(scene_uid)
-        splatviz.set_transform(0, quat=squat, trans=spos)
-        opos, oquat = p.getBasePositionAndOrientation(obj_uid)
-        splatviz.set_transform(1, quat=oquat, trans=opos)
+        scpos, scquat = bullet_to_splatviz(pos_pb=spos, quat_pb_xyzw=squat, com=None, quat_I=None, is_object=False)
+        print(spos, squat)
+        splatviz.set_transform(0, scquat, scpos)
+
+        opos, oquat = p.getBasePositionAndOrientation(obj_uid)  # PyBullet position and quaternion (x,y,z,w)
+        print(opos, oquat)
+        sopos, soquat = bullet_to_splatviz(pos_pb=opos, quat_pb_xyzw=oquat, com=com, quat_I=quat_I, is_object=True)
+        splatviz.set_transform(1, soquat, sopos)
         splatviz.draw_frame()
     splatviz.close()
 
