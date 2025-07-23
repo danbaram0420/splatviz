@@ -9,38 +9,19 @@ from pybullet_utils import bullet_client
 from trimesh.transformations import quaternion_from_matrix
 from scipy.spatial.transform import Rotation as R
 
-R_cs   = R.from_euler('x',  +90, degrees=True).as_matrix()
-R_fix  = R.from_euler('x', -210, degrees=True).as_matrix()   # 210° 보정
-R_obj  = R.from_euler('x',  -90, degrees=True).as_matrix()   # 내장 +90°
-R_corr = R_fix @ R_obj
+def local_delta_link(p_b, q_b, p_i, q_i, p_t, q_t):
+    # 현재 링크 자세
+    q_bt = R.from_quat(q_t) * R.from_quat(q_i).inv()
+    p_bt = np.asarray(p_t) - q_bt.apply(p_i)
 
-# ★ object 전용:  mesh → COM 오프셋 & 회전 (생성 때 쓴 값)                  # (x,y,z) in mesh local
-     # mesh → Inertial
-def bullet_to_splatviz(pos_pb, quat_pb_xyzw, com, quat_I, is_object=False):
-    """PyBullet  →  Splatviz"""
-    R_pb  = R.from_quat(quat_pb_xyzw).as_matrix()
+    # 상대값 (링크 기준)
+    q_rel = R.from_quat(q_b).inv() * q_bt
+    p_rel = R.from_quat(q_b).inv().apply(p_bt - p_b)
+    q_rel_xyzw = q_rel.as_quat()
+    q_rel_wxyz = (q_rel_xyzw[3], *q_rel_xyzw[:3])
 
-    # --- 위치 변환 -------------------------------------------------------
-    if is_object:
-        # 월드-메시원점 = 월드-COM – R_pb·COM_L
-        pos_world_mesh = np.asarray(pos_pb) - R_pb @ com
-        R_LI = R.from_quat(quat_I).as_matrix()
-    else:          # scene 은 inertial offset이 없음
-        pos_world_mesh = np.asarray(pos_pb)
+    return tuple(p_rel), tuple(q_rel_wxyz)
 
-    pos_sv = R_cs @ pos_world_mesh          # Z-up→-Y-up
-
-    # --- 회전 변환 -------------------------------------------------------
-    if is_object:
-        R_world_mesh = R_pb @ R_LI.T        # inertial 보정
-    else:
-        R_world_mesh = R_pb
-
-    R_sv  = R_cs @ (R_world_mesh @ R_corr)
-    quat_sv = R.from_matrix(R_sv).as_quat()   # (x,y,z,w)
-    quat_sv = (quat_sv[3], *quat_sv[:3])      # (w,x,y,z)
-
-    return tuple(pos_sv), tuple(quat_sv)
 
 @click.command()
 @click.option("--data_path", default="./resources/sample_scenes", help="root path for .ply files", metavar="PATH")
@@ -54,7 +35,7 @@ def main(data_path, scene_path, objects_path, mode, host, port, gan_path):
     #physics
     p.connect(p.GUI)  # 또는 p.DIRECT
     p.setGravity(0, 0, -9.81)
-    p.setTimeStep(1 / 240)
+    p.setTimeStep(1 / 100)
 
     p.setAdditionalSearchPath(pybullet_data.getDataPath())  # plane.urdf 등
 
@@ -96,8 +77,6 @@ def main(data_path, scene_path, objects_path, mode, host, port, gan_path):
 
     convex_path = "cube_high/point_cloud_obj/iteration_37000/obj_vhacd.obj"
     obj_mesh = "cube_high/point_cloud_obj/iteration_37000/obj_vhacd.obj"
-
-    quat = p.getQuaternionFromEuler([math.radians(210), 0, 0])
 
     mesh = trimesh.load(convex_path, force='mesh')
     density = 700  # kg/m³  (목적에 맞게 조정)
@@ -141,18 +120,13 @@ def main(data_path, scene_path, objects_path, mode, host, port, gan_path):
     else:
         splatviz = Splatviz(data_path=data_path, mode=mode, host=host, port=port)
 
-
     while not splatviz.should_close():
         p.stepSimulation()
-        spos, squat = p.getBasePositionAndOrientation(scene_uid)
-        scpos, scquat = bullet_to_splatviz(pos_pb=spos, quat_pb_xyzw=squat, com=None, quat_I=None, is_object=False)
-        print(spos, squat)
-        splatviz.set_transform(0, scquat, scpos)
 
         opos, oquat = p.getBasePositionAndOrientation(obj_uid)  # PyBullet position and quaternion (x,y,z,w)
-        print(opos, oquat)
-        sopos, soquat = bullet_to_splatviz(pos_pb=opos, quat_pb_xyzw=oquat, com=com, quat_I=quat_I, is_object=True)
-        splatviz.set_transform(1, soquat, sopos)
+        lopos, loquat = local_delta_link([0, 0, 0], quat, initialPos, quat_I, opos, oquat)
+        print("opos =", opos, " oquat =", oquat, "lopos =", lopos, " loquat =", loquat)
+        splatviz.set_transform(1, loquat, lopos)
         splatviz.draw_frame()
     splatviz.close()
 
