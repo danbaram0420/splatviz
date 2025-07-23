@@ -3,10 +3,14 @@ import numpy as np
 import torch
 import sys
 import os
+import pybullet as p, trimesh
+from trimesh.transformations import quaternion_from_matrix
 
 sys.path.append("./gaussian-splatting")
 torch.set_printoptions(precision=2, sci_mode=False)
 np.set_printoptions(precision=2)
+
+from scipy.spatial.transform import Rotation as R
 
 from renderer.renderer_wrapper import RendererWrapper
 from renderer.gaussian_renderer import GaussianRenderer
@@ -32,9 +36,8 @@ from widgets import (
     training,
 )
 
-
 class Splatviz(imgui_window.ImguiWindow):
-    def __init__(self, data_path, mode, host, port, gan_path="", scene_path="", objects_path=""):
+    def __init__(self, data_path, mode, host, port, quat, gan_path="", scene_path="", objects_path="", ):
         self.code_font_path = "resources/fonts/jetbrainsmono/JetBrainsMono-Regular.ttf"
         self.regular_font_path = "resources/fonts/source_sans_pro/SourceSansPro-Regular.otf"
 
@@ -52,6 +55,8 @@ class Splatviz(imgui_window.ImguiWindow):
 
         # Internals.
         self._last_error_print = None
+
+        self.quat = quat
 
         # Determine initial files to load
         initial_files = None
@@ -120,11 +125,21 @@ class Splatviz(imgui_window.ImguiWindow):
 
         # After initializing widgets and renderer...
         # Initialize transform list for each loaded scene/object
-        num_initial = len(self.widgets[0].plys)
         # Each transform is stored as (quat, trans), quat=[1,0,0,0] (w,x,y,z), trans=[0,0,0] initially
+        num_initial = len(self.widgets[0].plys)
         identity_quat = torch.tensor([1.0, 0.0, 0.0, 0.0], dtype=torch.float32, device="cuda")
         identity_trans = torch.tensor([0.0, 0.0, 0.0], dtype=torch.float32, device="cuda")
+        self.physics_initials = []
         self.object_transforms = [(identity_quat, identity_trans) for _ in range(num_initial)]
+
+        for idx, ply_path in enumerate(initial_files):
+            if idx == 0:
+                self.load_scene_physics(ply_path, self.quat)
+            else:
+                self.load_dynamic_object(ply_path, self.quat, initial=True)
+
+        self.pending_object_path = None
+        self.fixed_depth = 3.0
 
         # Initialize window.
         self.set_position(0, 0)
@@ -253,7 +268,86 @@ class Splatviz(imgui_window.ImguiWindow):
         else:
             self.eval_result = None
 
+        if self.pending_object_path and imgui.is_mouse_clicked(imgui.MouseButton_.left):
+            mx, my = imgui.get_mouse_pos()
+            vw, vh = self.content_width, self.content_height
+            nx = (mx / vw) * 2 - 1
+            ny = -(my / vh) * 2 + 1
+
+            cam_pos, cam_dir = self.widgets[1].get_camera_ray(nx, ny)
+            target_pos = cam_pos + cam_dir * self.fixed_depth
+            self.load_dynamic_object(self.pending_object_path, target_pos, initial=False)
+            self.pending_object_path = None
+
         # End frame.
         self._adjust_font_size()
         imgui.end()
         self.end_frame()
+
+    def load_scene_physics(self, ply_path, quat):
+        #quat는 wxyz form으로 가정
+        folder = os.path.dirname(ply_path)
+        cand = [f for f in os.listdir(folder) if f.lower().endswith(".obj")]
+        if not cand:
+            print("No .obj found next to", ply_path)
+            return
+        obj_path = os.path.join(folder, cand[0])
+        sc_col = p.createCollisionShape(p.GEOM_MESH,
+                                        fileName=obj_path,
+                                        flags=p.GEOM_FORCE_CONCAVE_TRIMESH)
+        sc_vis = p.createVisualShape(p.GEOM_MESH, fileName=obj_path)
+        scene_uid = p.createMultiBody(baseMass=0,
+                                      baseCollisionShapeIndex=sc_col,
+                                      baseVisualShapeIndex=sc_vis, basePosition=[0, 0, 0], baseOrientation=quat)
+        print("scene_uid =", scene_uid, " sc_vis =", sc_vis)  # -1 이면 로드 실패
+        assert scene_uid >= 0 and sc_vis >= 0, "scene mesh 로드 실패!"
+        self.physics_initials.append((scene_uid,quat, [0, 0, 0]))
+
+    def load_dynamic_object(self, ply_path, pos, initial=False):
+        scene_quat, _ = self.object_transforms[0]
+        if not initial:
+            self.widgets[0].plys.append(os.path.abspath(ply_path))
+            gaussian_t = torch.tensor(pos, dtype=torch.float32, device="cuda")
+            gaussian_q = torch.tensor([1,0,0,0], dtype=torch.float32, device="cuda")
+            self.object_transforms.append((gaussian_q, gaussian_t))
+
+        folder = os.path.dirname(ply_path)
+        cand = [f for f in os.listdir(folder) if f.lower().endswith(".obj")]
+        if not cand:
+            print("No .obj found next to", ply_path)
+            return
+        obj_path = os.path.join(folder, cand[0])
+        if initial:
+            physics_pos = [0,0,0]
+        else:
+            physics_pos = R.from_quat(scene_quat).apply(pos)
+        self.bullet_load_obj(obj_path, physics_pos, scene_quat.tolist())
+
+    def bullet_load_obj(self, obj_path, pos, quat):
+        vhacd_path = obj_path.replace(".obj", "_vhacd.obj")
+        if not os.path.exists(vhacd_path):
+            p.vhacd(obj_path, vhacd_path, "vhacd_log.txt",concavity=0.002, resolution=1_000_000)
+        mesh = trimesh.load(vhacd_path, force='mesh')
+        com = mesh.center_mass
+        col = p.createCollisionShape(p.GEOM_MESH, fileName=vhacd_path)
+        vis = p.createVisualShape(p.GEOM_MESH, fileName=vhacd_path)
+        I_tensor = mesh.moment_inertia
+        eigval, eigvec = np.linalg.eigh(I_tensor)
+        quat_I = quaternion_from_matrix(np.vstack([np.hstack([eigvec, [[0], [0], [0]]]),
+                                                   [0, 0, 0, 1]])[:3, :3]).tolist()
+        obj_uid = p.createMultiBody(baseMass=2.0,
+                                    baseCollisionShapeIndex=col,
+                                    baseVisualShapeIndex=vis,
+                                    basePosition=[pos[0], pos[1], pos[2]],
+                                    baseOrientation=quat,
+                                    baseInertialFramePosition=com.tolist(),
+                                    baseInertialFrameOrientation=quat_I)
+
+        p.changeDynamics(obj_uid, -1,
+                         lateralFriction=0.9,
+                         rollingFriction=0.03, spinningFriction=0.03,
+                         linearDamping=0.05, angularDamping=0.05,
+                         frictionAnchor=1,
+                         activationState=p.ACTIVATION_STATE_ENABLE_SLEEPING)
+        self.physics_initials.append((obj_uid,quat_I,com.tolist()))
+        print("obj created")

@@ -1,5 +1,7 @@
 import os
 from imgui_bundle import imgui
+import tkinter as tk
+from tkinter import filedialog
 
 from splatviz_utils.gui_utils import imgui_utils
 from splatviz_utils.gui_utils.easy_imgui import label
@@ -63,6 +65,18 @@ class LoadWidget(Widget):
             if len(self.plys) > 1:
                 use_splitscreen, self.use_splitscreen = imgui.checkbox("Splitscreen", self.use_splitscreen)
                 highlight_border, self.highlight_border = imgui.checkbox("Highlight Border", self.highlight_border)
+
+            if imgui_utils.button("Add PLY From File", width=viz.button_w+5):
+                root = tk.Tk()
+                root.withdraw()
+                path = filedialog.askopenfilename(filetypes=[("PLY files", "*.ply")])
+                root.destroy()
+                if path and path.endswith(".ply"):
+                    self.plys.append(os.path.abspath(path))
+                ident_q = torch.tensor([1, 0, 0, 0], dtype=torch.float32, device="cuda")
+                ident_t = torch.tensor([0, 0, 0], dtype=torch.float32, device="cuda")
+                viz.object_transforms.append((ident_q, ident_t))
+                viz.pending_object_path = path
 
         viz.args.highlight_border = self.highlight_border
         viz.args.use_splitscreen = self.use_splitscreen
