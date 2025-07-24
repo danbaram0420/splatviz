@@ -8,19 +8,9 @@ import trimesh, numpy as np, pybullet as p, math, os, pybullet_data
 from pybullet_utils import bullet_client
 from trimesh.transformations import quaternion_from_matrix
 from scipy.spatial.transform import Rotation as R
+import cv2
 
-def local_delta_link(p_b, q_b, p_i, q_i, p_t, q_t):
-    # 현재 링크 자세
-    q_bt = R.from_quat(q_t) * R.from_quat(q_i).inv()
-    p_bt = np.asarray(p_t) - q_bt.apply(p_i)
 
-    # 상대값 (링크 기준)
-    q_rel = R.from_quat(q_b).inv() * q_bt
-    p_rel = R.from_quat(q_b).inv().apply(p_bt - p_b)
-    q_rel_xyzw = q_rel.as_quat()
-    q_rel_wxyz = (q_rel_xyzw[3], *q_rel_xyzw[:3])
-
-    return tuple(p_rel), tuple(q_rel_wxyz)
 
 
 @click.command()
@@ -35,7 +25,7 @@ def main(data_path, scene_path, objects_path, mode, host, port, gan_path):
     #physics
     p.connect(p.GUI)  # 또는 p.DIRECT
     p.setGravity(0, 0, -9.81)
-    p.setTimeStep(1 / 100)
+    p.setTimeStep(1 / 50)
 
     p.setAdditionalSearchPath(pybullet_data.getDataPath())  # plane.urdf 등
 
@@ -97,7 +87,7 @@ def main(data_path, scene_path, objects_path, mode, host, port, gan_path):
     initialPos = com.tolist()
 
     obj_uid = p.createMultiBody(
-        baseMass=2.0,  # 질량 [kg]
+        baseMass=30.0,  # 질량 [kg]
         baseCollisionShapeIndex=obj_col,
         baseVisualShapeIndex=obj_vis,
         basePosition=[0, 0, 0],  # 월드 좌표
@@ -105,6 +95,7 @@ def main(data_path, scene_path, objects_path, mode, host, port, gan_path):
         baseInertialFramePosition=initialPos,  # ★ CoM
         baseInertialFrameOrientation=quat_I,
     )
+    ply_path = os.path.abspath("cube_high/point_cloud_obj/iteration_37000/point_cloud.ply")
     p.changeDynamics(obj_uid, -1,
                      lateralFriction=0.9,
                      rollingFriction=0.03, spinningFriction=0.03,
@@ -120,15 +111,21 @@ def main(data_path, scene_path, objects_path, mode, host, port, gan_path):
     else:
         splatviz = Splatviz(data_path=data_path, mode=mode, host=host, port=port)
 
+    splatviz.register_dynamic_object(ply_path, obj_uid, com, quat_I, init_world_pos = [0, 0, 0], init_world_quat = quat)
+
+    capture = cv2.VideoCapture(0)
+    capture.set(cv2.CAP_PROP_FRAME_WIDTH, 640)
+    capture.set(cv2.CAP_PROP_FRAME_HEIGHT, 480)
+
     while not splatviz.should_close():
         p.stepSimulation()
-
-        opos, oquat = p.getBasePositionAndOrientation(obj_uid)  # PyBullet position and quaternion (x,y,z,w)
-        lopos, loquat = local_delta_link([0, 0, 0], quat, initialPos, quat_I, opos, oquat)
-        print("opos =", opos, " oquat =", oquat, "lopos =", lopos, " loquat =", loquat)
-        splatviz.set_transform(1, loquat, lopos)
+        splatviz.sync_dynamic_objects(scene_origin_pos=[0, 0, 0], scene_origin_quat=quat)
         splatviz.draw_frame()
+        ret, frame = capture.read()
+        cv2.imshow("frame", frame)
+        cv2.waitKey(1)
     splatviz.close()
+    capture.release()
 
 if __name__ == '__main__':
     main()
