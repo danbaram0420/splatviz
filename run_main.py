@@ -8,6 +8,7 @@ import trimesh, numpy as np, pybullet as p, math, os, pybullet_data
 from pybullet_utils import bullet_client
 from trimesh.transformations import quaternion_from_matrix
 from scipy.spatial.transform import Rotation as R
+import cv2
 
 
 
@@ -24,7 +25,7 @@ def main(data_path, scene_path, objects_path, mode, host, port, gan_path):
     #physics
     p.connect(p.GUI)  # 또는 p.DIRECT
     p.setGravity(0, 0, -9.81)
-    p.setTimeStep(1 / 100)
+    p.setTimeStep(1 / 50)
 
     p.setAdditionalSearchPath(pybullet_data.getDataPath())  # plane.urdf 등
 
@@ -86,7 +87,7 @@ def main(data_path, scene_path, objects_path, mode, host, port, gan_path):
     initialPos = com.tolist()
 
     obj_uid = p.createMultiBody(
-        baseMass=2.0,  # 질량 [kg]
+        baseMass=30.0,  # 질량 [kg]
         baseCollisionShapeIndex=obj_col,
         baseVisualShapeIndex=obj_vis,
         basePosition=[0, 0, 0],  # 월드 좌표
@@ -112,11 +113,19 @@ def main(data_path, scene_path, objects_path, mode, host, port, gan_path):
 
     splatviz.register_dynamic_object(ply_path, obj_uid, com, quat_I, init_world_pos = [0, 0, 0], init_world_quat = quat)
 
+    capture = cv2.VideoCapture(0)
+    capture.set(cv2.CAP_PROP_FRAME_WIDTH, 640)
+    capture.set(cv2.CAP_PROP_FRAME_HEIGHT, 480)
+
     while not splatviz.should_close():
         p.stepSimulation()
         splatviz.sync_dynamic_objects(scene_origin_pos=[0, 0, 0], scene_origin_quat=quat)
         splatviz.draw_frame()
+        ret, frame = capture.read()
+        cv2.imshow("frame", frame)
+        cv2.waitKey(1)
     splatviz.close()
+    capture.release()
 
 if __name__ == '__main__':
     main()

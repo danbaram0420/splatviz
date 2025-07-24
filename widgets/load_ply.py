@@ -53,7 +53,7 @@ def create_physics_object_from_mesh(obj_path, global_quat, spawn_pos):
     if mass <= 0 or flag != 0:
         mass = 0.0
 
-    bid  = p.createMultiBody(baseMass=2.0,
+    bid  = p.createMultiBody(baseMass=30.0,
                              baseCollisionShapeIndex=cid,
                              baseVisualShapeIndex=vid,
                              basePosition=spawn_pos.tolist(),
