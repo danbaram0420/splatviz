@@ -4,6 +4,10 @@ import torch
 import sys
 import os
 
+from trimesh.transformations import quaternion_from_matrix
+from scipy.spatial.transform import Rotation as R
+import trimesh, pybullet as p, math, pybullet_data
+
 sys.path.append("./gaussian-splatting")
 torch.set_printoptions(precision=2, sci_mode=False)
 np.set_printoptions(precision=2)
@@ -32,6 +36,18 @@ from widgets import (
     training,
 )
 
+def local_delta_link(p_b, q_b, p_i, q_i, p_t, q_t):
+    # 현재 링크 자세
+    q_bt = R.from_quat(q_t) * R.from_quat(q_i).inv()
+    p_bt = np.asarray(p_t) - q_bt.apply(p_i)
+
+    # 상대값 (링크 기준)
+    q_rel = R.from_quat(q_b).inv() * q_bt
+    p_rel = R.from_quat(q_b).inv().apply(p_bt - p_b)
+    q_rel_xyzw = q_rel.as_quat()
+    q_rel_wxyz = (q_rel_xyzw[3], *q_rel_xyzw[:3])
+
+    return tuple(p_rel), tuple(q_rel_wxyz)
 
 class Splatviz(imgui_window.ImguiWindow):
     def __init__(self, data_path, mode, host, port, gan_path="", scene_path="", objects_path=""):
@@ -122,9 +138,11 @@ class Splatviz(imgui_window.ImguiWindow):
         # Initialize transform list for each loaded scene/object
         num_initial = len(self.widgets[0].plys)
         # Each transform is stored as (quat, trans), quat=[1,0,0,0] (w,x,y,z), trans=[0,0,0] initially
-        identity_quat = torch.tensor([1.0, 0.0, 0.0, 0.0], dtype=torch.float32, device="cuda")
-        identity_trans = torch.tensor([0.0, 0.0, 0.0], dtype=torch.float32, device="cuda")
-        self.object_transforms = [(identity_quat, identity_trans) for _ in range(num_initial)]
+        self.identity_quat = torch.tensor([1.0, 0.0, 0.0, 0.0], dtype=torch.float32, device="cuda")
+        self.identity_trans = torch.tensor([0.0, 0.0, 0.0], dtype=torch.float32, device="cuda")
+        self.object_transforms = [(self.identity_quat, self.identity_trans) for _ in range(num_initial)]
+
+        self.dynamic_objects = {}
 
         # Initialize window.
         self.set_position(0, 0)
@@ -207,7 +225,8 @@ class Splatviz(imgui_window.ImguiWindow):
                 new_transforms.append(prev_map[fname])
             else:
                 # New file (added) -> default identity transform
-                new_transforms.append((identity_quat.clone(), identity_trans.clone()))
+                new_transforms.append((self.identity_quat.clone(),
+                                       self.identity_trans.clone()))
         self.object_transforms = new_transforms
 
         # Pass transforms to renderer via args
@@ -257,3 +276,31 @@ class Splatviz(imgui_window.ImguiWindow):
         self._adjust_font_size()
         imgui.end()
         self.end_frame()
+
+    def register_dynamic_object(self, ply_path, bullet_id, com, quat_I,
+                                init_world_pos, init_world_quat):
+        """PyBullet 물체와 해당 .ply 를 연결·초기 변환도 즉시 반영."""
+        abs_path = os.path.abspath(ply_path)
+        self.dynamic_objects[abs_path] = {"id": bullet_id,
+                                          "com": com,
+                                          "quat_I": quat_I}
+        # 파일이 막 로드되지 않았다면, 파일리스트에 강제로 삽입
+        if abs_path not in self.widgets[0].plys:
+            self.widgets[0].plys.append(abs_path)
+        # 처음 한 프레임이라도 곧바로 올바른 위치에 보이도록
+        rel_pos, rel_quat = local_delta_link(
+            [0, 0, 0], init_world_quat, com, quat_I,
+            init_world_pos, init_world_quat)
+        idx = self.widgets[0].plys.index(abs_path)
+        self.set_transform(idx, rel_quat, rel_pos)
+
+    def sync_dynamic_objects(self, scene_origin_pos, scene_origin_quat):
+        """매 프레임 PyBullet→Gaussian 좌표 업데이트."""
+        for path, info in self.dynamic_objects.items():
+            bid, com, quat_I = info["id"], info["com"], info["quat_I"]
+            pos_w, quat_w = p.getBasePositionAndOrientation(bid)
+            rel_pos, rel_quat = local_delta_link(scene_origin_pos, scene_origin_quat,
+                                                 com, quat_I, pos_w, quat_w)
+            if path in self.widgets[0].plys:
+                idx = self.widgets[0].plys.index(path)
+                self.set_transform(idx, rel_quat, rel_pos)
