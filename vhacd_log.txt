@@ -29,7 +29,7 @@ Examples:
 
 + OpenCL (OFF)
 + Parameters
-	 input                                       /home/media/바탕화면/workspace/splatviz/cube_high/point_cloud_obj/iteration_37000/obj_vhacd.obj
+	 input                                       /home/media/바탕화면/workspace/splatviz/objects/basket/Basketball_size6_SF.obj
 	 resolution                                  250000
 	 max. depth                                  20
 	 max. concavity                              0.002
@@ -46,7 +46,27 @@ Examples:
 	 OpenCL acceleration                         1
 	 OpenCL platform ID                          0
 	 OpenCL device ID                            0
-	 output                                      /home/media/바탕화면/workspace/splatviz/cube_high/point_cloud_obj/iteration_37000/obj_vhacd_vhacd.obj
+	 output                                      /home/media/바탕화면/workspace/splatviz/objects/basket/Basketball_size6_SF_vhacd.obj
 	 log                                         vhacd_log.txt
 + Load mesh
 + Voxelization
+	 dim = 64	-> 139867 voxels
+	 dim = 78	-> 251971 voxels
+	 time 0.0130049s
++ Compute primitive set
+	 # primitives               251971
+	 # inside surface           224044
+	 # on surface               27927
+	 time 0.000480197s
++ Approximate Convex Decomposition
+	 Subdivision level 1
+	 -> Part[0] C  = 0.0461238, E  = 0.106779, VS = 27927, VI = 224044
++ Generate 1 convex-hulls 
+	 time 0.0513981s
++ Merge Convex Hulls
+	 time 5.621e-06s
++ Simplify 1 convex-hulls 
+		 Simplify CH[00000] 1418 V, 2832 T
+	 time 0.00995006s
++ Generate output: 1 convex-hulls 
+	 CH[00000] 64 V, 124 T

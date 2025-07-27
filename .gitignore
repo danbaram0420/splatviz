@@ -13,3 +13,8 @@ history.json
 *.npz
 *.pdf
 *.code-workspace
+6dgs/
+splats/
+cube_high/
+realscene_1/
+realscene_2/
