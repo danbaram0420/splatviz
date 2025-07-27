@@ -12,6 +12,114 @@ from trimesh.transformations import quaternion_from_matrix
 from scipy.spatial.transform import Rotation as R
 import cv2
 
+def setup_static_scene(scene_ply: Path, world_quat):
+    """Load the static scene mesh sitting next to *scene_ply*.
+
+    Expected sibling file name: ``tsdf_fusion_post_vis.obj``.  Returns *scene_uid*.
+    """
+    scene_mesh = scene_ply.with_name("tsdf_fusion_post_vis.obj")
+    assert scene_mesh.is_file(), f"Scene mesh '{scene_mesh}' not found"
+
+    sc_col = p.createCollisionShape(
+        p.GEOM_MESH,
+        fileName=str(scene_mesh),
+        flags=p.GEOM_FORCE_CONCAVE_TRIMESH,
+    )
+    sc_vis = p.createVisualShape(p.GEOM_MESH, fileName=str(scene_mesh))
+
+    uid = p.createMultiBody(
+        baseMass=0,  # static
+        baseCollisionShapeIndex=sc_col,
+        baseVisualShapeIndex=sc_vis,
+        basePosition=[0, 0, 0],
+        baseOrientation=world_quat,
+    )
+    if uid < 0:
+        raise RuntimeError(f"Failed to load scene mesh '{scene_mesh}'")
+    return uid
+
+def vhacd_if_needed(src_obj: Path, dst_obj: Path):
+    """Run VHACD on *src_obj* → *dst_obj* unless *dst_obj* already exists."""
+    if dst_obj.exists():
+        return
+    ok = p.vhacd(
+        str(src_obj),
+        str(dst_obj),
+        str(dst_obj.with_suffix(".log")),
+        concavity=0.002,
+        resolution=1_000_000,
+    )
+    if not ok:
+        raise RuntimeError(f"VHACD failed for '{src_obj}' (see log)")
+
+def inertia_quat(mesh: trimesh.Trimesh):
+    """Principal‑axis quaternion of *mesh*'s inertia tensor."""
+    I = mesh.moment_inertia
+    _, eigvec = np.linalg.eigh(I)
+    # Build a 3×3 rotation matrix from eigen‑vectors
+    R_I = np.ascontiguousarray(eigvec)
+    return quaternion_from_matrix(
+        np.vstack((np.hstack((R_I, [[0], [0], [0]])), [0, 0, 0, 1]))[:3, :3]
+    ).tolist()
+
+def load_dynamic_objects(objects_dir: Path, splatviz: Splatviz, world_quat):
+    """Discover every ``point_cloud_*.ply`` in *objects_dir* and register them."""
+
+    for ply_path in sorted(objects_dir.glob("point_cloud_*.ply")):
+        idx = ply_path.stem.split("_")[-1]  # handles arbitrary index names
+        obj_mesh = ply_path.with_suffix(".obj")
+        vhacd_mesh = objects_dir / f"obj_vhacd_{idx}.obj"
+
+        if not obj_mesh.is_file():
+            print(f"[WARN] Missing OBJ for {ply_path.name}, skipping")
+            continue
+
+        vhacd_if_needed(obj_mesh, vhacd_mesh)
+
+        # ------------------------------------------------------------------
+        # Physics
+        # ------------------------------------------------------------------
+        mesh = trimesh.load(vhacd_mesh, force="mesh")
+        com = mesh.center_mass  # [x, y, z]  in local‑mesh frame
+        quat_I = inertia_quat(mesh)
+
+        col_id = p.createCollisionShape(p.GEOM_MESH, fileName=str(vhacd_mesh))
+        vis_id = p.createVisualShape(p.GEOM_MESH, fileName=str(vhacd_mesh))
+
+        uid = p.createMultiBody(
+            baseMass=10.0,
+            baseCollisionShapeIndex=col_id,
+            baseVisualShapeIndex=vis_id,
+            basePosition=[0, 0, 0],
+            baseOrientation=world_quat,
+            baseInertialFramePosition=com.tolist(),
+            baseInertialFrameOrientation=quat_I,
+        )
+        p.changeDynamics(
+            uid,
+            -1,
+            lateralFriction=0.5,
+            rollingFriction=0.03,
+            spinningFriction=0.03,
+            linearDamping=0.05,
+            angularDamping=0.05,
+            frictionAnchor=1,
+            activationState=p.ACTIVATION_STATE_ENABLE_SLEEPING,
+        )
+
+        # ------------------------------------------------------------------
+        # Splatviz registration
+        # ------------------------------------------------------------------
+        splatviz.register_dynamic_object(
+            str(ply_path.resolve()),
+            uid,
+            com,
+            quat_I,
+            init_world_pos=[0, 0, 0],
+            init_world_quat=world_quat,
+        )
+        print(f"[INFO] Registered dynamic object {ply_path.name} → uid {uid}")
+
 
 @click.command()
 @click.option("--data_path", default="./resources/sample_scenes", help="root path for .ply files", metavar="PATH")
@@ -28,14 +136,11 @@ def main(data_path, scene_path, objects_path, checkpoint_path, mode, host, port,
     p.connect(p.GUI)  # 또는 p.DIRECT
     p.setGravity(0, 0, -9.81)
     p.setTimeStep(1 / 50)
-
     p.setAdditionalSearchPath(pybullet_data.getDataPath())  # plane.urdf 등
-
     p.configureDebugVisualizer(p.COV_ENABLE_GUI, 1)
     p.configureDebugVisualizer(p.COV_ENABLE_SHADOWS, 1)
     p.configureDebugVisualizer(p.COV_ENABLE_WIREFRAME, 0)
-
-    quat = p.getQuaternionFromEuler([math.radians(235), 0, 0])
+    world_quat = p.getQuaternionFromEuler([math.radians(235), 0, 0])
 
     p.setPhysicsEngineParameter(
         numSolverIterations=150,
@@ -43,128 +148,21 @@ def main(data_path, scene_path, objects_path, checkpoint_path, mode, host, port,
         enableConeFriction=1
         # enableSleeping=1  ← 지원 안 되는 버전
     )
-    # 1) 바닥(plane) 추가: 옵션
-    # p.loadURDF("plane.urdf")
-
-    # 2) 정적 Scene 메시 ----------------------------------
-    scene_mesh = "realscene_2/point_cloud_scene/iteration_65000/tsdf_fusion_post_vis.obj"
-    sc_col = p.createCollisionShape(p.GEOM_MESH,
-                                    fileName=scene_mesh,
-                                    flags=p.GEOM_FORCE_CONCAVE_TRIMESH)
-    sc_vis = p.createVisualShape(p.GEOM_MESH, fileName=scene_mesh)
-    scene_uid = p.createMultiBody(baseMass=0,
-                                  baseCollisionShapeIndex=sc_col,
-                                  baseVisualShapeIndex=sc_vis, basePosition=[0, 0, 0], baseOrientation=quat)
-
-    print("scene_uid =", scene_uid, " sc_vis =", sc_vis)  # -1 이면 로드 실패
-    assert scene_uid >= 0 and sc_vis >= 0, "scene mesh 로드 실패!"
-
-    # 3) 동적 오브젝트 -------------------------------------
-    #1
-    obj_mesh_1 = "realscene_2/point_cloud_obj/iteration_67000/point_cloud_1.obj"
-    if not os.path.exists("realscene_2/point_cloud_obj/iteration_67000/obj_vhacd_1.obj"):
-        # (권장) 먼저 볼록 분해: 결과 .vhacd.obj 가 자동 저장됨
-        ok = p.vhacd(obj_mesh_1, "realscene_2/point_cloud_obj/iteration_67000/obj_vhacd_1.obj", "log.txt", concavity=0.002, resolution=1_000_000)
-        if not ok:
-            raise RuntimeError("VHACD 실패—로그 확인")
-
-    convex_path_1 = "realscene_2/point_cloud_obj/iteration_67000/obj_vhacd_1.obj"
-    obj_mesh_1 = "realscene_2/point_cloud_obj/iteration_67000/obj_vhacd_1.obj"
-
-    mesh_1 = trimesh.load(convex_path_1, force='mesh')
-    com_1 = mesh_1.center_mass  # [x,y,z]  (메시 로컬 기준)
-
-    I_tensor_1 = mesh_1.moment_inertia  # 3×3, CoM 기준
-    eigval, eigvec = np.linalg.eigh(I_tensor_1)  # 주축 분해
-    # 행렬→쿼터니언
-
-    quat_I_1 = quaternion_from_matrix(np.vstack([np.hstack([eigvec, [[0], [0], [0]]]),
-                                               [0, 0, 0, 1]])[:3, :3]).tolist()
-
-    obj_col_1 = p.createCollisionShape(p.GEOM_MESH, fileName=convex_path_1)
-    obj_vis_1 = p.createVisualShape(p.GEOM_MESH, fileName=obj_mesh_1)
-
-    initialPos_1 = com_1.tolist()
-
-    obj_uid_1 = p.createMultiBody(
-        baseMass=30.0,  # 질량 [kg]
-        baseCollisionShapeIndex=obj_col_1,
-        baseVisualShapeIndex=obj_vis_1,
-        basePosition=[0, 0, 0],  # 월드 좌표
-        baseOrientation=quat,
-        baseInertialFramePosition=initialPos_1,  # ★ CoM
-        baseInertialFrameOrientation=quat_I_1,
-    )
-    ply_path_1 = os.path.abspath("realscene_2/point_cloud_obj/iteration_67000/point_cloud_1.ply")
-    p.changeDynamics(obj_uid_1, -1,
-                     lateralFriction=0.9,
-                     rollingFriction=0.03, spinningFriction=0.03,
-                     linearDamping=0.05, angularDamping=0.05,
-                     frictionAnchor=1,
-                     activationState=p.ACTIVATION_STATE_ENABLE_SLEEPING)
-    print("obj created")
-
-    #2
-    obj_mesh_2 = "realscene_2/point_cloud_obj/iteration_67000/point_cloud_2.obj"
-    if not os.path.exists("realscene_2/point_cloud_obj/iteration_67000/obj_vhacd_2.obj"):
-        # (권장) 먼저 볼록 분해: 결과 .vhacd.obj 가 자동 저장됨
-        ok = p.vhacd(obj_mesh_2, "realscene_2/point_cloud_obj/iteration_67000/obj_vhacd_2.obj", "log.txt",
-                     concavity=0.002, resolution=1_000_000)
-        if not ok:
-            raise RuntimeError("VHACD 실패—로그 확인")
-
-    convex_path_2 = "realscene_2/point_cloud_obj/iteration_67000/obj_vhacd_2.obj"
-    obj_mesh_2 = "realscene_2/point_cloud_obj/iteration_67000/obj_vhacd_2.obj"
-
-    mesh_2 = trimesh.load(convex_path_2, force='mesh')
-    com_2 = mesh_2.center_mass  # [x,y,z]  (메시 로컬 기준)
-
-    I_tensor_2 = mesh_2.moment_inertia  # 3×3, CoM 기준
-    eigval, eigvec = np.linalg.eigh(I_tensor_2)  # 주축 분해
-    # 행렬→쿼터니언
-
-    quat_I_2 = quaternion_from_matrix(np.vstack([np.hstack([eigvec, [[0], [0], [0]]]),
-                                                 [0, 0, 0, 1]])[:3, :3]).tolist()
-
-    obj_col_2 = p.createCollisionShape(p.GEOM_MESH, fileName=convex_path_2)
-    obj_vis_2 = p.createVisualShape(p.GEOM_MESH, fileName=obj_mesh_2)
-
-    initialPos_2 = com_2.tolist()
-
-    obj_uid_2 = p.createMultiBody(
-        baseMass=30.0,  # 질량 [kg]
-        baseCollisionShapeIndex=obj_col_2,
-        baseVisualShapeIndex=obj_vis_2,
-        basePosition=[0, 0, 0],  # 월드 좌표
-        baseOrientation=quat,
-        baseInertialFramePosition=initialPos_2,  # ★ CoM
-        baseInertialFrameOrientation=quat_I_2,
-    )
-    ply_path_2 = os.path.abspath("realscene_2/point_cloud_obj/iteration_67000/point_cloud_2.ply")
-    p.changeDynamics(obj_uid_2, -1,
-                     lateralFriction=0.9,
-                     rollingFriction=0.03, spinningFriction=0.03,
-                     linearDamping=0.05, angularDamping=0.05,
-                     frictionAnchor=1,
-                     activationState=p.ACTIVATION_STATE_ENABLE_SLEEPING)
-    print("obj created")
-
-
-
+    if scene_path:
+        scene_ply = Path(scene_path)
+        setup_static_scene(scene_ply, world_quat)
 
     # If scene_path is provided, use it and any .ply files in objects_path
     if scene_path:
         splatviz = Splatviz(data_path=data_path, mode=mode, host=host, port=port,
-                             scene_path=scene_path, objects_path=objects_path)
+                                scene_path=scene_path, objects_path=objects_path)
     else:
         splatviz = Splatviz(data_path=data_path, mode=mode, host=host, port=port)
 
-    splatviz.register_dynamic_object(ply_path_1, obj_uid_1, com_1, quat_I_1, init_world_pos = [0, 0, 0], init_world_quat = quat)
-    splatviz.register_dynamic_object(ply_path_2, obj_uid_2, com_2, quat_I_2, init_world_pos = [0, 0, 0], init_world_quat = quat)
+    if objects_path:
+        load_dynamic_objects(Path(objects_path), splatviz, world_quat)
 
-
-
-    model_ply = checkpoint_path + "point_cloud/iteration_30000/point_cloud.ply"
+    model_ply = checkpoint_path + "point_cloud/iteration_60000/point_cloud.ply"
     id_module_ckpt = checkpoint_path + "id_module.th"
     predictor = None
     if os.path.isfile(model_ply) and os.path.isfile(id_module_ckpt):
@@ -245,7 +243,7 @@ def main(data_path, scene_path, objects_path, checkpoint_path, mode, host, port,
 
     while not splatviz.should_close():
         p.stepSimulation()
-        splatviz.sync_dynamic_objects(scene_origin_pos=[0, 0, 0], scene_origin_quat=quat)
+        splatviz.sync_dynamic_objects(scene_origin_pos=[0, 0, 0], scene_origin_quat=world_quat)
         if predictor is not None:
             with buf_lock:
                 if pose_buf["new"]:
