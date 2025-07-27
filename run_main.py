@@ -12,6 +12,60 @@ from trimesh.transformations import quaternion_from_matrix
 from scipy.spatial.transform import Rotation as R
 import cv2
 
+def convert_ply_to_obj(ply_path: str, out_obj_path: str,
+                       grid_fine: int = 256, grid_coarse: int = 128,
+                       lvl_fine: float = 0.18, lvl_coarse: float = 0.05):
+    """
+    point‑cloud *.ply* → watertight *.obj*  (gaussian splatting friendly)
+    Params are 그대로 기본값 사용.
+    """
+    import open3d as o3d, numpy as np, plyfile, skimage.measure as mc, os
+
+    ply   = plyfile.PlyData.read(ply_path)
+    xyz   = np.stack([ply['vertex'][ax] for ax in ('x','y','z')], 1)
+    alpha = np.where(np.isfinite(ply['vertex']['opacity']) &
+                     (ply['vertex']['opacity']>0),
+                     ply['vertex']['opacity'], 0) * 0.5
+    sigma_log = np.stack([ply['vertex'][f'scale_{i}'] for i in range(3)], 1)
+    sigma_lin = 2 ** sigma_log
+
+    RES, PAD = 256, 0.05
+    bmin, bmax = xyz.min(0)-PAD, xyz.max(0)+PAD
+
+    def voxelize(grid_res, min_sigma_scale):
+        vox = np.zeros((grid_res,)*3, np.float32)
+        vsize = (bmax-bmin)/(grid_res-1)
+        minσ  = vsize.min()*min_sigma_scale
+        for p,a,s in zip(xyz,alpha,sigma_lin):
+            if a==0: continue
+            σ = np.maximum(s,minσ)
+            lo = np.floor(((p-σ)-bmin)/vsize).astype(int)
+            hi = np.ceil(((p+σ)-bmin)/vsize).astype(int)+1
+            xs,ys,zs=[np.clip(np.arange(l,h),0,grid_res-1) for l,h in zip(lo,hi)]
+            gx,gy,gz=np.meshgrid(xs,ys,zs,indexing='ij')
+            coords=np.stack([gx,gy,gz],-1)*vsize+bmin
+            d2=((coords-p)**2/(σ**2+1e-9)).sum(-1)
+            vox[np.ix_(xs,ys,zs)] += (d2<1).astype(np.float32)*np.maximum(a,0.05)
+        vox/=vox.max()
+        return vox
+
+    # coarse + fine
+    vox_c = voxelize(grid_coarse, 2.0)
+    verts_c,faces_c,_,_ = mc.marching_cubes(vox_c, level=lvl_coarse)
+    vox_f = voxelize(grid_fine, 1.2)
+    verts_f,faces_f,_,_ = mc.marching_cubes(vox_f, level=lvl_fine)
+
+    scale_c = (bmax-bmin)/(grid_coarse-1); scale_f = (bmax-bmin)/(grid_fine-1)
+    mesh_c = o3d.geometry.TriangleMesh(
+                o3d.utility.Vector3dVector(verts_c*scale_c + bmin),
+                o3d.utility.Vector3iVector(faces_c))
+    mesh_f = o3d.geometry.TriangleMesh(
+                o3d.utility.Vector3dVector(verts_f*scale_f + bmin),
+                o3d.utility.Vector3iVector(faces_f))
+    mesh=(mesh_c+mesh_f).remove_duplicated_vertices().filter_smooth_taubin(5)
+    os.makedirs(os.path.dirname(out_obj_path), exist_ok=True)
+    o3d.io.write_triangle_mesh(out_obj_path, mesh)
+
 def setup_static_scene(scene_ply: Path, world_quat):
     """Load the static scene mesh sitting next to *scene_ply*.
 
@@ -49,8 +103,6 @@ def vhacd_if_needed(src_obj: Path, dst_obj: Path):
         concavity=0.002,
         resolution=1_000_000,
     )
-    if not ok:
-        raise RuntimeError(f"VHACD failed for '{src_obj}' (see log)")
 
 def inertia_quat(mesh: trimesh.Trimesh):
     """Principal‑axis quaternion of *mesh*'s inertia tensor."""
@@ -68,6 +120,9 @@ def load_dynamic_objects(objects_dir: Path, splatviz: Splatviz, world_quat):
     for ply_path in sorted(objects_dir.glob("point_cloud_*.ply")):
         idx = ply_path.stem.split("_")[-1]  # handles arbitrary index names
         obj_mesh = ply_path.with_suffix(".obj")
+        if not obj_mesh.is_file():  # <─ 변경 블록 시작
+            print(f"[INFO] OBJ not found for {ply_path.name} → gaustomesh meshing")
+            convert_ply_to_obj(str(ply_path), str(obj_mesh))
         vhacd_mesh = objects_dir / f"obj_vhacd_{idx}.obj"
 
         if not obj_mesh.is_file():
@@ -125,13 +180,14 @@ def load_dynamic_objects(objects_dir: Path, splatviz: Splatviz, world_quat):
 @click.option("--data_path", default="./resources/sample_scenes", help="root path for .ply files", metavar="PATH")
 @click.option("--scene_path", default="", help="Path to a single scene .ply file", type=click.Path())
 @click.option("--objects_path", default="", help="Path to a directory of object .ply files", type=click.Path())
+@click.option("--rotation", default=0, help="Degree of rotation of scene and object files")
 @click.option("--checkpoint_path", default="", help="Folder of id_module.th", type=str)
 @click.option("--mode", default="default", type=str, help="viewer mode")
 @click.option("--host", default="127.0.0.1")
 @click.option("--port", default=7860)
 @click.option("--gan_path", default=None)
 @click.option("--video", default="", help="Video file path (if empty, use webcam 0)", type=str)
-def main(data_path, scene_path, objects_path, checkpoint_path, mode, host, port, gan_path, video=0):
+def main(data_path, scene_path, objects_path, checkpoint_path, mode, host, port, gan_path, video=0, rotation=0):
     #physics
     p.connect(p.GUI)  # 또는 p.DIRECT
     p.setGravity(0, 0, -9.81)
@@ -140,7 +196,7 @@ def main(data_path, scene_path, objects_path, checkpoint_path, mode, host, port,
     p.configureDebugVisualizer(p.COV_ENABLE_GUI, 1)
     p.configureDebugVisualizer(p.COV_ENABLE_SHADOWS, 1)
     p.configureDebugVisualizer(p.COV_ENABLE_WIREFRAME, 0)
-    world_quat = p.getQuaternionFromEuler([math.radians(235), 0, 0])
+    world_quat = p.getQuaternionFromEuler([math.radians(rotation), 0, 0])
 
     p.setPhysicsEngineParameter(
         numSolverIterations=150,
@@ -155,7 +211,7 @@ def main(data_path, scene_path, objects_path, checkpoint_path, mode, host, port,
     # If scene_path is provided, use it and any .ply files in objects_path
     if scene_path:
         splatviz = Splatviz(data_path=data_path, mode=mode, host=host, port=port,
-                                scene_path=scene_path, objects_path=objects_path)
+                                scene_path=scene_path, objects_path=objects_path, rotation=rotation)
     else:
         splatviz = Splatviz(data_path=data_path, mode=mode, host=host, port=port)
 

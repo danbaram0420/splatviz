@@ -50,7 +50,7 @@ def local_delta_link(p_b, q_b, p_i, q_i, p_t, q_t):
     return tuple(p_rel), tuple(q_rel_wxyz)
 
 class Splatviz(imgui_window.ImguiWindow):
-    def __init__(self, data_path, mode, host, port, gan_path="", scene_path="", objects_path=""):
+    def __init__(self, data_path, mode, host, port, gan_path="", scene_path="", objects_path="", rotation=0):
         self.code_font_path = "resources/fonts/jetbrainsmono/JetBrainsMono-Regular.ttf"
         self.regular_font_path = "resources/fonts/source_sans_pro/SourceSansPro-Regular.otf"
 
@@ -85,6 +85,7 @@ class Splatviz(imgui_window.ImguiWindow):
             initial_files[1:] = sorted(initial_files[1:])
 
         self.widgets = []
+        self.rotation = rotation
         update_all_the_time = True
         if mode == "default":
             # Pass initial_files to LoadWidget if provided

@@ -140,7 +140,7 @@ class LoadWidget(Widget):
                         forward = cam_widget.forward.cpu().numpy()  # camera forward unit vector
                         spawn_pos = cam_pos + forward * 1.0  # spawn 2.0 units in front of camera
                         # Use the global rotation offset (210° about X-axis) for orientation so object aligns with scene
-                        global_quat = p.getQuaternionFromEuler([math.radians(235), 0, 0])
+                        global_quat = p.getQuaternionFromEuler([math.radians(viz.rotation), 0, 0])
                         spawn_pos_world = R.from_quat(global_quat).apply(spawn_pos)
                         bid, com, quat_I = create_physics_object_from_mesh(obj_path,
                                                                            global_quat,
