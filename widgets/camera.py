@@ -45,6 +45,8 @@ class CamWidget(Widget):
         self.momentum_dropoff = 0.8
         self.momentum = 0.3
 
+        self.locked_by_external = False
+
     @imgui_utils.scoped_by_object_id
     def __call__(self, show: bool):
         viz = self.viz
@@ -123,7 +125,14 @@ class CamWidget(Widget):
                     self.lookat_point = viz.result.mean_xyz
             imgui.pop_item_width()
 
-        self.cam_params = create_cam2world_matrix(self.forward, self.cam_pos, self.up_vector)[0]
+        if not self.locked_by_external:
+            self.cam_params = create_cam2world_matrix(
+                self.forward, self.cam_pos, self.up_vector
+            )[0]
+        else:
+            # 사용자가 마우스·키보드로 움직이면 잠금 해제
+            if imgui.is_mouse_dragging(0) or len(self.viz.current_pressed_keys) > 0:
+                self.locked_by_external = False
         if show:
             imgui.text("\nExtrinsics Matrix")
             imgui.input_float4("##extr0", self.cam_params.cpu().numpy().tolist()[0])
@@ -228,3 +237,74 @@ class CamWidget(Widget):
                 self.cam_pos += self.forward * self.move_speed * wheel
             elif self.control_modes[self.current_control_mode] == "Orbit":
                 self.radius -= wheel / 10
+
+    def set_external_camera_pose(self, matrix):
+        mat = torch.as_tensor(matrix, dtype=torch.float32, device=self.device)
+
+        # 행렬을 그대로 보존
+        self.cam_params = mat
+        self.locked_by_external = True  # 잠금
+
+        # 내부 상태도 맞춰 둬야 WASD 등 조작이 정상
+        self.cam_pos = mat[:3, 3]
+        self.forward = mat[:3, 2] / torch.linalg.norm(mat[:3, 2])
+        self.up_vector = mat[:3, 1] / torch.linalg.norm(mat[:3, 1])
+
+
+    # def set_external_camera_pose(self, matrix):
+    #     viz = self.viz
+    #     world_ref = torch.as_tensor([0., 0., -1.], dtype=torch.float32, device=self.device)
+    #     """4×4 camera-to-world 행렬을 그대로 적용 (yaw/pitch로 쪼개지 않음)."""
+    #     mat = torch.as_tensor(matrix, dtype=torch.float32, device=self.device)
+    #     print("set")
+    #     print(mat)
+    #
+    #     # # 위치
+    #     self.cam_pos = mat[:3, 3]
+    #     # 카메라 지역축(OpenGL 기준) → 월드축
+    #     forward = mat[:3, 2]  # +Z 가 시선 반대방향(카메라 앞쪽) ⇒ 그대로 사용
+    #     # print(forward)
+    #     up_vec = mat[:3, 1]  # +Y 가 '상'
+    #     # print(up_vec)
+    #     #
+    #     # # 정규화
+    #     forward = forward / torch.linalg.norm(forward)
+    #     up_vec = up_vec / torch.linalg.norm(up_vec)
+    #     #
+    #     self.forward = forward
+    #     self.up_vector = up_vec  # ★ 기존 고정값 갱신
+    #
+    #     yaw = torch.arctan2(forward[0], forward[2])
+    #     pitch = torch.arctan2(forward[1], torch.sqrt(forward[0]**2 + forward[2]**2))
+    #     yaw = yaw.cpu().numpy()
+    #     pitch = pitch.cpu().numpy()
+    #
+    #     # pitch = torch.arcsin(torch.dot(forward, up_vec))
+    #     # pitch = pitch.cpu().numpy()
+    #     #
+    #     # # horizontal forward
+    #     # f_h = forward - torch.dot(forward, up_vec) * up_vec
+    #     # f_h = f_h / torch.linalg.norm(f_h)
+    #     #
+    #     # # reference axis in the horizontal plane
+    #     # ref = world_ref - torch.dot(world_ref, up_vec) * up_vec
+    #     # if torch.linalg.norm(ref) < 1e-6:
+    #     #     ref = torch.array([1., 0., 0.]) - torch.dot(torch.array([1., 0., 0.]), up_vec) * up_vec
+    #     # ref = ref / torch.linalg.norm(ref)
+    #     #
+    #     # # yaw (+: left-turn around up)
+    #     # yaw = torch.arctan2(
+    #     #     torch.dot(torch.cross(ref, f_h), up_vec),
+    #     #     torch.dot(ref, f_h)
+    #     # )
+    #     #
+    #     # yaw = yaw.cpu().numpy()
+    #
+    #     self.pose.pitch = float(pitch)
+    #     self.pose.yaw = float(yaw)
+    #     self.current_control_mode = 1  # “WASD” 모드 고정
+    #     #
+    #     # # radius 유지(Orbit 전환 대비)
+    #     self.radius = torch.linalg.norm(self.cam_pos - self.lookat_point).item()
+    #     if self.radius == 0:
+    #         self.radius = 1.0

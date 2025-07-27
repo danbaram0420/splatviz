@@ -304,3 +304,11 @@ class Splatviz(imgui_window.ImguiWindow):
             if path in self.widgets[0].plys:
                 idx = self.widgets[0].plys.index(path)
                 self.set_transform(idx, rel_quat, rel_pos)
+
+    def set_external_camera_pose(self, matrix):
+        """외부에서 계산된 카메라 포즈를 현재 뷰어에 적용한다."""
+        # Splatviz의 widgets 목록에서 Camera 위젯 찾아서 pose 설정 메서드 호출
+        for widget in self.widgets:
+            if getattr(widget, "name", "") == "Camera":
+                widget.set_external_camera_pose(matrix)
+                break
