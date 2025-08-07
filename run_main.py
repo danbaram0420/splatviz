@@ -153,7 +153,7 @@ def load_dynamic_objects(objects_dir: Path, splatviz: Splatviz, world_quat):
         p.changeDynamics(
             uid,
             -1,
-            lateralFriction=0.9,
+            lateralFriction=0.5,
             rollingFriction=0.03,
             spinningFriction=0.03,
             linearDamping=0.05,

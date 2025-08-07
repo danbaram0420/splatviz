@@ -30,6 +30,7 @@ from widgets import (
     load_pkl,
     load_ply,
     camera,
+    camera_sequence,
     save,
     latent,
     render,
@@ -92,6 +93,7 @@ class Splatviz(imgui_window.ImguiWindow):
             self.widgets = [
                 load_ply.LoadWidget(self, data_path, initial_files=initial_files),
                 camera.CamWidget(self),
+                camera_sequence.CameraSequenceWidget(self),
                 performance.PerformanceWidget(self),
                 save.CaptureWidget(self),
                 render.RenderWidget(self),
@@ -102,6 +104,7 @@ class Splatviz(imgui_window.ImguiWindow):
         elif mode == "attach":
             self.widgets = [
                 camera.CamWidget(self),
+                camera_sequence.CameraSequenceWidget(self),
                 performance.PerformanceWidget(self),
                 render.RenderWidget(self),
                 edit.EditWidget(self),
@@ -114,6 +117,7 @@ class Splatviz(imgui_window.ImguiWindow):
             self.widgets = [
                 load_pkl.LoadWidget(self, data_path, file_ending=".pkl"),
                 camera.CamWidget(self, fov=12, radius=2.7, up_direction=1),
+                camera_sequence.CameraSequenceWidget(self),
                 performance.PerformanceWidget(self),
                 save.CaptureWidget(self),
                 render.RenderWidget(self),
