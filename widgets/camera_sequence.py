@@ -231,6 +231,9 @@ class CameraSequenceWidget(Widget):
                             delta = time.perf_counter() - self.pause_time  # ★ 멈춰 있던 시간
                             self.segment_start_time += delta  # 재생 기준점을 뒤로 밀기
                             self.paused = False
+                            # ★ 추가: 재생 재개 시에도 CamWidget 잠금
+                            if self.cam_widget:
+                                self.cam_widget.locked_by_external = True
                         imgui.same_line()
                         # 정지 ■
                         if imgui_utils.button("Stop", width=viz.button_w):
@@ -240,6 +243,10 @@ class CameraSequenceWidget(Widget):
                             if hasattr(viz, 'auto_pose_enabled'):
                                 viz.auto_pose_enabled = True
         if self.playing and not self.paused:
+            # ─────────────★ 추가 ★─────────────
+            if self.cam_widget:  # CamWidget 포인터는 _start_segment에서 저장됨
+                self.cam_widget.locked_by_external = True
+            # ──────────────────────────────────
             # 모든 세그먼트를 이미 끝냈다면 종료
             if self.current_segment >= len(self.saved_cameras) - 1:
                 self._stop_playback(viz)
