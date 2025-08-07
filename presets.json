@@ -1,6 +1,6 @@
 {
   "Default": {
-    "edit_text": "gs._xyz = gs._xyz\ngs._rotation = gs._rotation\ngs._scaling = gs._scaling\ngs._opacity = gs._opacity\ngs._features_dc = gs._features_dc\ngs._features_rest = gs._features_rest\n",
+    "edit_text": "scale_factor = 2 ** slider.get('scale', 0.0)\ngs._xyz = gs._xyz\ngs._rotation = gs._rotation\ngs._scaling = gs._scaling * scale_factor\ngs._opacity = gs._opacity\ngs._features_dc = gs._features_dc\ngs._features_rest = gs._features_rest\n",
     "slider": [
       {
         "key": "x",

@@ -13,9 +13,11 @@ from renderer.gaussian_renderer import GaussianRenderer
 from scene.gaussian_model import GaussianModel
 from widgets.widget import Widget
 
-default_preset = """gaussian._xyz = gaussian._xyz
+default_preset = """
+scale_factor = 2 ** slider.get('scale', 0.0)
+gaussian._xyz = gaussian._xyz
 gaussian._rotation = gaussian._rotation
-gaussian._scaling = gaussian._scaling
+gaussian._scaling = gaussian._scaling * scale_factor
 gaussian._opacity = gaussian._opacity
 gaussian._features_dc = gaussian._features_dc
 gaussian._features_rest = gaussian._features_rest
@@ -91,6 +93,7 @@ class EditWidget(Widget):
         self._cur_val_slider = 0
         self._cur_name_slider = self.var_names[self.var_name_index]
         self._cur_preset_name = ""
+        self._global_scale = 0.0
 
     def setup_editor(self):
         language = edit.TextEditor.LanguageDefinition.python()
@@ -177,6 +180,7 @@ class EditWidget(Widget):
 
         viz.args.edit_text = self.last_text
         viz.args.slider = {slider.key: slider.value for slider in self.sliders}
+        viz.args.slider["scale"] = self._global_scale
 
     def load_presets(self):
         if not os.path.exists(self.preset_path):
@@ -232,3 +236,13 @@ class EditWidget(Widget):
             )
             self.var_name_index += 1
             self._cur_name_slider = self.var_names[self.var_name_index % len(self.var_names)]
+
+        imgui.separator()
+        label("Global Scale")
+        with imgui_utils.item_width(int(self.viz.pane_w * 0.5)):
+            _changed, self._global_scale = imgui.slider_float(
+                "##global_scale",  # ID
+                self._global_scale,  # 현재 값
+                -5.0, 5.0,  # 범위
+                format="%.2f",
+            )
