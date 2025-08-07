@@ -7,8 +7,10 @@ from splatviz_utils.gui_utils.easy_imgui import label
 from widgets.widget import Widget
 from tkinter import Tk, filedialog
 import pybullet as p
+import numpy as np
 from trimesh.transformations import quaternion_from_matrix
 from scipy.spatial.transform import Rotation as R
+import shutil
 
 def create_physics_object_from_mesh(obj_path, global_quat, spawn_pos):
     """
@@ -37,8 +39,6 @@ def create_physics_object_from_mesh(obj_path, global_quat, spawn_pos):
 
     # 3) 물성치, 관성 ----------------------------------------
     mesh      = trimesh.load(convex, force='mesh')
-    density   = 700.0                               # kg/m³ 임의
-    mass      = mesh.volume * density
     com       = mesh.center_mass
     eigval, eigvec = np.linalg.eigh(mesh.moment_inertia)
     quat_I    = quaternion_from_matrix(eigvec).tolist()  # baseInertialFrameOrientation (w,x,y,z)
@@ -49,11 +49,8 @@ def create_physics_object_from_mesh(obj_path, global_quat, spawn_pos):
     cid  = p.createCollisionShape(p.GEOM_MESH, fileName=convex, flags=flag)
     vid  = p.createVisualShape   (p.GEOM_MESH, fileName=obj_path)
 
-    # concave mesh를 fallback 으로 쓸 땐 mass=0으로 강제하여 crash 회피
-    if mass <= 0 or flag != 0:
-        mass = 0.0
 
-    bid  = p.createMultiBody(baseMass=30.0,
+    bid  = p.createMultiBody(baseMass=20.0,
                              baseCollisionShapeIndex=cid,
                              baseVisualShapeIndex=vid,
                              basePosition=spawn_pos.tolist(),
@@ -84,6 +81,7 @@ class LoadWidget(Widget):
             self.plys: list[str] = [self.items[0]]
         self.use_splitscreen = False
         self.highlight_border = False
+        self.called_objects = 0
 
     @imgui_utils.scoped_by_object_id
     def __call__(self, show=True):
@@ -117,46 +115,42 @@ class LoadWidget(Widget):
                 self.plys.append(self.plys[-1])
 
             if imgui_utils.button("Insert Object", width=viz.button_w):
-                # Open an OS file dialog for the user to select a .ply file
-                root = Tk()
-                root.withdraw()  # hide the root Tk window
-                file_path = filedialog.askopenfilename(filetypes=[("Point Cloud Files", "*.ply")])
-                if file_path:
-                    file_path = os.path.abspath(file_path)
-                    # Add the selected .ply to the list of loaded scenes/objects
+                # 파일 다이얼로그 대신 고정 경로의 파일을 자동 로드
+                file_path = os.path.abspath("objects/pokeball/point_cloud.ply")
+                obj_path = os.path.abspath("objects/pokeball/obj_vhacd.obj")
+                if file_path not in self.plys:
                     self.plys.append(file_path)
-                    # Find a corresponding .obj file in the same directory (assume one exists)
-                    obj_path = None
-                    folder = os.path.dirname(file_path)
-                    for fname in os.listdir(folder):
-                        if fname.lower().endswith(".obj"):
-                            obj_path = os.path.join(folder, fname)
-                            break
-                    if obj_path is None:
-                        print(f"No .obj file found in folder: {folder}")
-                    else:
-                        cam_widget = self.viz.widgets[1]  # Camera widget is typically at index 1
-                        cam_pos = cam_widget.cam_pos.cpu().numpy()  # camera position (world coordinates)
-                        forward = cam_widget.forward.cpu().numpy()  # camera forward unit vector
-                        spawn_pos = cam_pos + forward * 1.0  # spawn 2.0 units in front of camera
-                        # Use the global rotation offset (210° about X-axis) for orientation so object aligns with scene
-                        global_quat = p.getQuaternionFromEuler([math.radians(viz.rotation), 0, 0])
-                        spawn_pos_world = R.from_quat(global_quat).apply(spawn_pos)
-                        bid, com, quat_I = create_physics_object_from_mesh(obj_path,
-                                                                           global_quat,
-                                                                           spawn_pos_world)
-                        # Splatviz 등록
-                        self.viz.register_dynamic_object(file_path, bid, com, quat_I,
-                                                         init_world_pos=spawn_pos_world,
-                                                         init_world_quat=global_quat)
-                        forward_world = R.from_quat(global_quat).apply(forward)
-                        F = 10000.0  # [N] 원하는 세기
-                        com_world = spawn_pos_world + R.from_quat(global_quat).apply(com)
-                        p.applyExternalForce(bid,  # bodyUniqueId
-                                             -1,  # base link
-                                             forward_world * F,
-                                             com_world,  # 힘 작용점 (COM)
-                                             p.WORLD_FRAME)
+                else:
+                    dir_name, file_name = os.path.split(file_path)
+                    base_name, ext = os.path.splitext(file_name)
+                    new_file_name = f"{base_name}_{self.called_objects}{ext}"
+                    new_file_path = os.path.join(dir_name, new_file_name)
+                    shutil.copyfile(file_path, new_file_path)
+                    self.plys.append(new_file_path)
+                    file_path = new_file_path
+                    # 선택된 .ply를 장면 목록에 추가
+                if not os.path.exists(file_path) or not os.path.exists(obj_path):
+                    print(f"Object files not found in 'objects/pokeball' directory")
+                else:
+                    cam_widget = self.viz.widgets[1]  # 일반적으로 index 1이 Camera 위젯
+                    cam_pos = cam_widget.cam_pos.cpu().numpy()
+                    forward = cam_widget.forward.cpu().numpy()
+                    global_quat = p.getQuaternionFromEuler([math.radians(viz.rotation), 0, 0])
+                    cam_pos_world = R.from_quat(global_quat).apply(cam_pos)
+                    forward_world = R.from_quat(global_quat).apply(forward)
+                    spawn_pos_world = cam_pos_world + forward_world / np.linalg.norm(forward_world) * 1.0
+                    # PyBullet에 오브젝트 생성 (convex mesh 사용)
+                    bid, com, quat_I = create_physics_object_from_mesh(obj_path, global_quat, spawn_pos_world)
+                    # Splatviz에 동적 오브젝트로 등록 (초기 pose 지정)
+                    self.viz.register_dynamic_object(file_path, bid, com, quat_I,
+                                                     init_world_pos=spawn_pos_world,
+                                                     init_world_quat=global_quat)
+                    # 물체에 전방(force) 힘 가하여 살짝 밀기 (물체 초기화면에서 보이도록)
+                    forward_world = R.from_quat(global_quat).apply(forward)
+                    F = 10000.0  # 힘의 세기
+                    com_world = spawn_pos_world + R.from_quat(global_quat).apply(com)
+                    p.applyExternalForce(bid, -1, forward_world * F, com_world, p.WORLD_FRAME)
+                    self.called_objects += 1
 
             if len(self.plys) > 1:
                 use_splitscreen, self.use_splitscreen = imgui.checkbox("Splitscreen", self.use_splitscreen)
