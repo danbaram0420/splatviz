@@ -288,6 +288,7 @@ class Splatviz(imgui_window.ImguiWindow):
         # 파일이 막 로드되지 않았다면, 파일리스트에 강제로 삽입
         if abs_path not in self.widgets[0].plys:
             self.widgets[0].plys.append(abs_path)
+
         # 처음 한 프레임이라도 곧바로 올바른 위치에 보이도록
         rel_pos, rel_quat = local_delta_link(
             [0, 0, 0], init_world_quat, com, quat_I,
@@ -311,5 +312,9 @@ class Splatviz(imgui_window.ImguiWindow):
         # Splatviz의 widgets 목록에서 Camera 위젯 찾아서 pose 설정 메서드 호출
         for widget in self.widgets:
             if getattr(widget, "name", "") == "Camera":
-                widget.set_external_camera_pose(matrix)
+                cam_widget = widget
+                # 토글이 ON인 경우에만 외부 pose 적용
+                if getattr(cam_widget, "auto_pose", True):
+                    cam_widget.set_external_camera_pose(matrix)
+                # OFF면 적용 건너뜀
                 break

@@ -142,7 +142,7 @@ def load_dynamic_objects(objects_dir: Path, splatviz: Splatviz, world_quat):
         vis_id = p.createVisualShape(p.GEOM_MESH, fileName=str(vhacd_mesh))
 
         uid = p.createMultiBody(
-            baseMass=10.0,
+            baseMass=5.0,
             baseCollisionShapeIndex=col_id,
             baseVisualShapeIndex=vis_id,
             basePosition=[0, 0, 0],
@@ -153,7 +153,7 @@ def load_dynamic_objects(objects_dir: Path, splatviz: Splatviz, world_quat):
         p.changeDynamics(
             uid,
             -1,
-            lateralFriction=0.5,
+            lateralFriction=0.9,
             rollingFriction=0.03,
             spinningFriction=0.03,
             linearDamping=0.05,
@@ -191,7 +191,7 @@ def main(data_path, scene_path, objects_path, checkpoint_path, mode, host, port,
     #physics
     p.connect(p.GUI)  # 또는 p.DIRECT
     p.setGravity(0, 0, -9.81)
-    p.setTimeStep(1 / 50)
+    p.setTimeStep(1 / 120)
     p.setAdditionalSearchPath(pybullet_data.getDataPath())  # plane.urdf 등
     p.configureDebugVisualizer(p.COV_ENABLE_GUI, 1)
     p.configureDebugVisualizer(p.COV_ENABLE_SHADOWS, 1)

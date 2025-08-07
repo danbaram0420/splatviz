@@ -1,6 +1,7 @@
 from imgui_bundle import imgui
 import torch
 import numpy as np
+import math
 
 from splatviz_utils.gui_utils.easy_imgui import label, slider, checkbox
 from splatviz_utils.gui_utils import imgui_utils
@@ -13,6 +14,10 @@ from splatviz_utils.cam_utils import (
 )
 from widgets.widget import Widget
 
+# helper
+def _norm(v: torch.Tensor) -> torch.Tensor:
+    """L2-normalize 3-vector tensor."""
+    return v / (torch.norm(v) + 1e-9)
 
 class CamWidget(Widget):
     def __init__(self, viz, fov=60, radius=1, up_direction=-1, device="cuda"):
@@ -46,6 +51,8 @@ class CamWidget(Widget):
         self.momentum = 0.3
 
         self.locked_by_external = False
+        self.auto_pose = True
+        self._prev_auto_pose = self.auto_pose
 
     @imgui_utils.scoped_by_object_id
     def __call__(self, show: bool):
@@ -82,6 +89,15 @@ class CamWidget(Widget):
 
             label("Invert Y", viz.label_w)
             self.invert_y = checkbox(self.invert_y, "invert_y")
+
+            label("Auto Pose", viz.label_w)
+            self.auto_pose = checkbox(self.auto_pose, "auto_pose")
+            imgui.same_line()
+            imgui.text("ON" if self.auto_pose else "OFF")
+
+            if self._prev_auto_pose and not self.auto_pose:
+                self._sync_pose_from_current_cam()
+            self._prev_auto_pose = self.auto_pose
 
             imgui.text("\nCamera Matrix")
 
@@ -190,13 +206,16 @@ class CamWidget(Widget):
 
     def handle_wasd(self):
         if self.control_modes[self.current_control_mode] == "WASD":
-            self.forward = get_forward_vector(
-                lookat_position=self.cam_pos,
-                horizontal_mean=self.pose.yaw + np.pi / 2,
-                vertical_mean=self.pose.pitch + np.pi / 2,
-                radius=0.01,
-                up_vector=self.up_vector,
-            )
+            dragging = imgui.is_mouse_dragging(0)
+            keys_move = len(self.viz.current_pressed_keys.intersection({"w", "a", "s", "d", "q", "e"})) > 0
+            if dragging or keys_move:
+                self.forward = get_forward_vector(
+                    lookat_position=self.cam_pos,
+                    horizontal_mean=self.pose.yaw + np.pi / 2,
+                    vertical_mean=self.pose.pitch + np.pi / 2,
+                    radius=0.01,
+                    up_vector=self.up_vector,
+                )
             self.sideways = torch.linalg.cross(self.forward, self.up_vector)
             if imgui.is_key_down(imgui.Key.up_arrow) or "w" in self.viz.current_pressed_keys:
                 self.cam_pos += self.forward * self.wasd_move_speed
@@ -241,70 +260,38 @@ class CamWidget(Widget):
     def set_external_camera_pose(self, matrix):
         mat = torch.as_tensor(matrix, dtype=torch.float32, device=self.device)
 
-        # 행렬을 그대로 보존
+        # 행렬 보존
         self.cam_params = mat
-        self.locked_by_external = True  # 잠금
+        self.locked_by_external = True
 
-        # 내부 상태도 맞춰 둬야 WASD 등 조작이 정상
+        # 내부 상태 동기화
         self.cam_pos = mat[:3, 3]
-        self.forward = mat[:3, 2] / torch.linalg.norm(mat[:3, 2])
-        self.up_vector = mat[:3, 1] / torch.linalg.norm(mat[:3, 1])
+        self.forward = _norm(mat[:3, 2])  # +Z
+        self.up_vector = _norm(-mat[:3, 1])  # +Y → world up
 
+        self.current_control_mode = 1  # WASD
+        self.radius = torch.linalg.norm(self.cam_pos - self.lookat_point).item() or 1.0
 
-    # def set_external_camera_pose(self, matrix):
-    #     viz = self.viz
-    #     world_ref = torch.as_tensor([0., 0., -1.], dtype=torch.float32, device=self.device)
-    #     """4×4 camera-to-world 행렬을 그대로 적용 (yaw/pitch로 쪼개지 않음)."""
-    #     mat = torch.as_tensor(matrix, dtype=torch.float32, device=self.device)
-    #     print("set")
-    #     print(mat)
-    #
-    #     # # 위치
-    #     self.cam_pos = mat[:3, 3]
-    #     # 카메라 지역축(OpenGL 기준) → 월드축
-    #     forward = mat[:3, 2]  # +Z 가 시선 반대방향(카메라 앞쪽) ⇒ 그대로 사용
-    #     # print(forward)
-    #     up_vec = mat[:3, 1]  # +Y 가 '상'
-    #     # print(up_vec)
-    #     #
-    #     # # 정규화
-    #     forward = forward / torch.linalg.norm(forward)
-    #     up_vec = up_vec / torch.linalg.norm(up_vec)
-    #     #
-    #     self.forward = forward
-    #     self.up_vector = up_vec  # ★ 기존 고정값 갱신
-    #
-    #     yaw = torch.arctan2(forward[0], forward[2])
-    #     pitch = torch.arctan2(forward[1], torch.sqrt(forward[0]**2 + forward[2]**2))
-    #     yaw = yaw.cpu().numpy()
-    #     pitch = pitch.cpu().numpy()
-    #
-    #     # pitch = torch.arcsin(torch.dot(forward, up_vec))
-    #     # pitch = pitch.cpu().numpy()
-    #     #
-    #     # # horizontal forward
-    #     # f_h = forward - torch.dot(forward, up_vec) * up_vec
-    #     # f_h = f_h / torch.linalg.norm(f_h)
-    #     #
-    #     # # reference axis in the horizontal plane
-    #     # ref = world_ref - torch.dot(world_ref, up_vec) * up_vec
-    #     # if torch.linalg.norm(ref) < 1e-6:
-    #     #     ref = torch.array([1., 0., 0.]) - torch.dot(torch.array([1., 0., 0.]), up_vec) * up_vec
-    #     # ref = ref / torch.linalg.norm(ref)
-    #     #
-    #     # # yaw (+: left-turn around up)
-    #     # yaw = torch.arctan2(
-    #     #     torch.dot(torch.cross(ref, f_h), up_vec),
-    #     #     torch.dot(ref, f_h)
-    #     # )
-    #     #
-    #     # yaw = yaw.cpu().numpy()
-    #
-    #     self.pose.pitch = float(pitch)
-    #     self.pose.yaw = float(yaw)
-    #     self.current_control_mode = 1  # “WASD” 모드 고정
-    #     #
-    #     # # radius 유지(Orbit 전환 대비)
-    #     self.radius = torch.linalg.norm(self.cam_pos - self.lookat_point).item()
-    #     if self.radius == 0:
-    #         self.radius = 1.0
+    def _sync_pose_from_current_cam(self):
+        # 1) pitch = asin(forward·up)
+        f = _norm(self.forward)
+        u = _norm(self.up_vector)
+        dot_fu = torch.clamp(torch.dot(f, u), -1.0 + 1e-6, 1.0 - 1e-6)
+        self.pose.pitch = float(torch.asin(dot_fu).item())
+
+        # 2) yaw  = atan2() 역산
+        h_vec = f - dot_fu * u  # 수평 성분
+        if torch.norm(h_vec) > 1e-6:
+            h_vec = _norm(h_vec)
+            horizontal_mean = math.atan2(-h_vec[2].item(), h_vec[0].item())
+            self.pose.yaw = horizontal_mean - math.pi / 2
+
+        # 3) Orbit 모드일 때 look-at 갱신
+        if self.current_control_mode == 0:  # Orbit
+            if self.radius <= 1e-6:
+                self.radius = 1.0
+            self.lookat_point = self.cam_pos + f * self.radius
+
+        # 모멘텀 리셋
+        self.momentum_x = self.momentum_y = 0.0
+        self.last_drag_delta = imgui.ImVec2(0, 0)
