@@ -144,7 +144,8 @@ class LoadWidget(Widget):
                     # Splatviz에 동적 오브젝트로 등록 (초기 pose 지정)
                     self.viz.register_dynamic_object(file_path, bid, com, quat_I,
                                                      init_world_pos=spawn_pos_world,
-                                                     init_world_quat=global_quat)
+                                                     init_world_quat=global_quat,
+                                                     obj_path=obj_path)
                     # 물체에 전방(force) 힘 가하여 살짝 밀기 (물체 초기화면에서 보이도록)
                     forward_world = R.from_quat(global_quat).apply(forward)
                     F = 10000.0  # 힘의 세기

@@ -35,6 +35,7 @@ from widgets import (
     latent,
     render,
     training,
+    trajectory,
 )
 from widgets.load_ply import create_physics_object_from_mesh
 
@@ -99,6 +100,7 @@ class Splatviz(imgui_window.ImguiWindow):
                 save.CaptureWidget(self),
                 render.RenderWidget(self),
                 edit.EditWidget(self),
+                trajectory.TrajectoryWidget(self),
                 eval.EvalWidget(self),
             ]
             renderer = GaussianRenderer()
@@ -163,6 +165,24 @@ class Splatviz(imgui_window.ImguiWindow):
 
         if not hasattr(self, "scene_origin_quat"):
             self.scene_origin_quat = p.getQuaternionFromEuler([math.radians(self.rotation), 0, 0])
+        if not hasattr(self, "scene_origin_pos"):
+            self.scene_origin_pos = np.zeros(3, dtype=np.float64)
+
+        # ---- trajectory shared state ----
+        self.traj_gt = []  # [(x,y,z), ...] in Bullet world
+        self.traj_pred = []  # [(x,y,z), ...]
+        self.traj_viz_on = False  # toggle
+        self.traj_downsample = 1
+        self.traj_length = 5.0
+        self.traj_recording = False
+        self.traj_init_state = {}
+        self.traj_learned_params = None
+        self.traj_training_done = False
+
+        # 최근 생성된 바디 ID를 trajectory 위젯이 잡아가기 위한 훅
+        self.last_spawned_bullet_id = None
+
+        self.bullet_to_path = {}
 
     def close(self):
         for widget in self.widgets:
@@ -286,7 +306,109 @@ class Splatviz(imgui_window.ImguiWindow):
             self.eval_result = self.result.eval
         else:
             self.eval_result = None
-            # [추가] 클릭-투-플레이스: 뷰포트(렌더 이미지) 클릭 시 스폰
+
+        # ====== [ANCHOR: after image draw] overlay trajectory ======
+        try:
+            if getattr(self, "traj_viz_on", False) and self._tex_obj is not None:
+                # 이미지 사각형 계산 (우리가 click-to-place에서 쓰던 것과 동일 로직)
+                view_w = self.content_width - self.pane_w
+                view_h = self.content_height
+                tex_w = float(self._tex_obj.width)
+                tex_h = float(self._tex_obj.height)
+                zoom = min(view_w / tex_w, view_h / tex_h)
+                draw_w = tex_w * zoom
+                draw_h = tex_h * zoom
+                left = pos[0] - draw_w * 0.5
+                right = pos[0] + draw_w * 0.5
+                top = pos[1] - draw_h * 0.5
+                bottom = pos[1] + draw_h * 0.5
+                aspect = draw_w / max(1.0, draw_h)
+
+                # 카메라 파라미터
+                camw = None
+                # 1) 이름으로 우선 탐색
+                for w in self.widgets:
+                    if getattr(w, "name", "") == "Camera":
+                        camw = w
+                        break
+                # 2) 폴백: 일반 배치(load_ply 다음이 카메라)라면 index=1
+                if camw is None and len(self.widgets) > 1:
+                    camw = self.widgets[1]
+                if camw is not None:
+                    fov_y_deg = float(getattr(camw, "fov", 60.0))
+                    fov_y = math.radians(fov_y_deg)
+
+                    # 뷰어 월드 기준 기저 (오른손계: right = fwd × up)
+                    fwd = getattr(camw, "forward", None)
+                    if fwd is None:
+                        print("[traj overlay] ERROR: Camera widget has no 'forward'")
+                        raise RuntimeError("Camera widget has no 'forward'")
+                    fwd = fwd.detach().cpu().numpy().astype(np.float64)
+                    fwd /= (np.linalg.norm(fwd) + 1e-9)
+
+                    upv_attr = "up" if hasattr(camw, "up") else ("up_vector" if hasattr(camw, "up_vector") else None)
+                    if upv_attr is None:
+                        upv = np.array([0.0, 1.0, 0.0], dtype=np.float64)
+                    else:
+                        upv = getattr(camw, upv_attr).detach().cpu().numpy().astype(np.float64)
+                    upv /= (np.linalg.norm(upv) + 1e-9)
+
+                    # ★ 오른손계 교정: right = fwd × up,  up' = right × fwd
+                    right_w = np.cross(fwd, upv);
+                    right_w /= (np.linalg.norm(right_w) + 1e-9)
+                    up_w = np.cross(right_w, fwd);
+                    up_w /= (np.linalg.norm(up_w) + 1e-9)
+
+                    cam_pos = camw.cam_pos.detach().cpu().numpy().astype(np.float64)
+
+                    def _COL32(r, g, b, a):
+                        if hasattr(imgui, "IM_COL32"):
+                            return imgui.IM_COL32(int(r), int(g), int(b), int(a))
+                        # 폴백: 0~1 float4를 받아들이는 바인딩용
+                        return imgui.get_color_u32(
+                            imgui.ImVec4(r / 255.0, g / 255.0, b / 255.0, a / 255.0))
+
+
+                    # 이제 traj 포인트는 이미 'Gaussian(렌더) 좌표'
+                    def project_world_point(pt_gauss):
+                        Pw = np.array(pt_gauss, dtype=np.float64)
+
+                        # 카메라 좌표 성분
+                        v = Pw - cam_pos
+                        # ★ 전방 = +Z 해석 (CamWidget.forward 가 씬을 향함)
+                        z = np.dot(v, fwd)
+                        if z <= 1e-6:
+                            return None
+
+                        tanY = math.tan(fov_y * 0.5)
+                        sx = left + (0.5 * ((np.dot(v, right_w) / z) / (tanY * aspect) + 1.0)) * draw_w
+                        sy = top + (0.5 * (1.0 - (np.dot(v, up_w) / z) / (tanY))) * draw_h
+                        return (sx, sy)
+
+                    def draw_polyline(points, rgba, thickness=2.0, step=1):
+                        dl = getattr(imgui, "get_foreground_draw_list", imgui.get_background_draw_list)()
+                        prev = None
+                        for pt in points[::max(1, step)]:
+                            sp = project_world_point(pt)
+                            if sp is None:
+                                prev = None
+                                continue
+                            if prev is not None:
+                                p1 = imgui.ImVec2(prev[0], prev[1])
+                                p2 = imgui.ImVec2(sp[0], sp[1])
+                                dl.add_line(p1, p2, _COL32(*rgba), thickness)
+                            prev = sp
+                    # 파랑(0,0,255,255), 빨강(255,0,0,255)
+                    if len(self.traj_gt) > 1:
+                        draw_polyline(self.traj_gt, (0, 0, 255, 255), thickness=2.0, step=max(1, self.traj_downsample))
+                    if len(self.traj_pred) > 1:
+                        draw_polyline(self.traj_pred, (255, 0, 0, 255), thickness=2.0,
+                                      step=max(1, self.traj_downsample))
+
+        except Exception as e:
+            print("[trajectory overlay] error:", e)
+        # ====== [END overlay trajectory] ======
+        # [추가] 클릭-투-플레이스: 뷰포트(렌더 이미지) 클릭 시 스폰
         try:
             if getattr(self, "awaiting_spawn_click",False) and "image" in self.result and self._tex_obj is not None:
                 # 렌더 텍스처의 실제 그려진 영역 계산
@@ -340,14 +462,14 @@ class Splatviz(imgui_window.ImguiWindow):
                             upv = np.array([0.0, 1.0, 0.0], dtype=np.float64)
                         else:
                             upv = upv.detach().cpu().numpy().astype(np.float64)
-                        # right, up을 오른손 좌표계로 재구성 (좌우 반전 해결)
-                        right_w = np.cross(upv, fwd)
+                        # ★ 동일한 오른손계 정의로 통일
+                        right_w = np.cross(fwd, upv);
                         right_w /= np.linalg.norm(right_w) + 1e-9
-                        up_w = np.cross(fwd, right_w)
+                        up_w = np.cross(right_w, fwd);
                         up_w /= np.linalg.norm(up_w) + 1e-9
 
-                        # 카메라 공간(-Z 전방)을 월드로 맵핑 (중앙 클릭: dir_world == fwd)
-                        dir_world = (right_w * dir_cam[0] +up_w * dir_cam[1] +fwd * (-dir_cam[2]))
+                        # 카메라 공간(-Z 전방)을 월드로 맵핑 (중앙 클릭 → dir_world == fwd)
+                        dir_world = (right_w * dir_cam[0] + up_w * dir_cam[1] + fwd * (-dir_cam[2]))
                         dir_world /= np.linalg.norm(dir_world) + 1e-9
 
                         # 카메라 위치(월드)
@@ -377,7 +499,10 @@ class Splatviz(imgui_window.ImguiWindow):
                                                                                    spawn_pos_world)
 
                             # 렌더러에 등록(초기 pose 지정)
-                            self.register_dynamic_object(file_path, bid, com, quat_I,init_world_pos=spawn_pos_world,init_world_quat=self.scene_origin_quat)
+                            self.register_dynamic_object(file_path, bid, com, quat_I,
+                                                         init_world_pos=spawn_pos_world,
+                                                         init_world_quat=self.scene_origin_quat,
+                                                         obj_path=obj_path)
 
                             # impulse(던지기): dir_bullet 방향으로 힘 가하기
                             F = float(getattr(self, "throw_impulse_newton", 10000.0))
@@ -402,24 +527,53 @@ class Splatviz(imgui_window.ImguiWindow):
         self.end_frame()
 
     def register_dynamic_object(self, ply_path, bullet_id, com, quat_I,
-                                init_world_pos, init_world_quat):
+                                init_world_pos, init_world_quat, obj_path=None):
         """PyBullet 물체와 해당 .ply 를 연결·초기 변환도 즉시 반영."""
         abs_path = os.path.abspath(ply_path)
-        self.dynamic_objects[abs_path] = {"id": bullet_id,
-                                          "com": com,
-                                          "quat_I": quat_I}
-        # 파일이 막 로드되지 않았다면, 파일리스트에 강제로 삽입
+        self.dynamic_objects[abs_path] = {
+            "id": bullet_id,
+            "com": com,
+            "quat_I": quat_I,
+            "obj_path": obj_path,  # ← 추가 저장
+            "ply_path": abs_path,  # ← 편의 저장
+        }
+        self.bullet_to_path[bullet_id] = abs_path  # ← 맵 채우기
+
         if abs_path not in self.widgets[0].plys:
             self.widgets[0].plys.append(abs_path)
 
         self.scene_origin_quat = init_world_quat
 
-        # 처음 한 프레임이라도 곧바로 올바른 위치에 보이도록
         rel_pos, rel_quat = local_delta_link(
             [0, 0, 0], init_world_quat, com, quat_I,
             init_world_pos, init_world_quat)
         idx = self.widgets[0].plys.index(abs_path)
         self.set_transform(idx, rel_quat, rel_pos)
+        self.last_spawned_bullet_id = bullet_id
+
+    def remove_dynamic_object_by_bid(self, bid: int, remove_ply: bool = True):
+        """Bullet 바디와 Gaussian(=ply 항목)을 함께 제거하고 모든 맵/상태를 정리한다."""
+        try:
+            path = self.bullet_to_path.get(bid, None)
+            # 1) PyBullet 바디 제거
+            try:
+                p.removeBody(bid)
+            except Exception:
+                pass
+            # 2) 내부 맵/사전 정리
+            if path and path in self.dynamic_objects:
+                del self.dynamic_objects[path]
+            if bid in self.bullet_to_path:
+                del self.bullet_to_path[bid]
+            # 3) Gaussian(=ply) 제거
+            if remove_ply and path and path in self.widgets[0].plys:
+                self.widgets[0].plys.remove(path)
+            # 4) transform 리스트는 다음 프레임에 plys 기반으로 재구성되므로 별도 조치 불필요
+            # 5) 최근 스폰 ID 정리
+            if getattr(self, "last_spawned_bullet_id", None) == bid:
+                self.last_spawned_bullet_id = None
+        except Exception as e:
+            print("[remove_dynamic_object_by_bid] error:", e)
 
     def sync_dynamic_objects(self, scene_origin_pos, scene_origin_quat):
         """매 프레임 PyBullet→Gaussian 좌표 업데이트."""
