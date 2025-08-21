@@ -153,13 +153,13 @@ def load_dynamic_objects(objects_dir: Path, splatviz: Splatviz, world_quat):
         p.changeDynamics(
             uid,
             -1,
-            lateralFriction=0.7,
-            rollingFriction=0.03,
-            spinningFriction=0.03,
-            linearDamping=0.05,
-            angularDamping=0.05,
+            lateralFriction=1.5,  # ↑ 마찰 강화 (1~2 권장)
+            rollingFriction=0.05,  # ↑ 굴림 마찰
+            spinningFriction=0.05,  # ↑ 스핀 마찰
+            linearDamping=0.01,  # ↓ 덜 답답하게
+            angularDamping=0.01,  # ↓
             frictionAnchor=1,
-            activationState=p.ACTIVATION_STATE_ENABLE_SLEEPING,
+            # 선택: restitution=0.0 ~ 0.1  (튀김 줄이려면)
         )
 
         # ------------------------------------------------------------------
@@ -191,7 +191,7 @@ def main(data_path, scene_path, objects_path, checkpoint_path, mode, host, port,
     #physics
     p.connect(p.GUI)  # 또는 p.DIRECT
     p.setGravity(0, 0, -9.81)
-    p.setTimeStep(1 / 120)
+    p.setTimeStep(1 / 240)
     p.setAdditionalSearchPath(pybullet_data.getDataPath())  # plane.urdf 등
     p.configureDebugVisualizer(p.COV_ENABLE_GUI, 1)
     p.configureDebugVisualizer(p.COV_ENABLE_SHADOWS, 1)
@@ -199,10 +199,15 @@ def main(data_path, scene_path, objects_path, checkpoint_path, mode, host, port,
     world_quat = p.getQuaternionFromEuler([math.radians(rotation), 0, 0])
 
     p.setPhysicsEngineParameter(
-        numSolverIterations=150,
+        fixedTimeStep=1.0 / 240.0,  # 물리 적분 간격 (작게)
+        numSubSteps=2,  # 내부 서브스텝
+        numSolverIterations=150,  # 이미 있던 값 유지
+        useSplitImpulse=1,  # 관통 안정화
+        splitImpulsePenetrationThreshold=-0.02,
+        restitutionVelocityThreshold=0.05,  # 미세 충돌 반발 억제
+        allowedCcdPenetration=0.002,  # CCD 허용 관통
+        enableConeFriction=1,
         contactBreakingThreshold=0.02,
-        enableConeFriction=1
-        # enableSleeping=1  ← 지원 안 되는 버전
     )
     if scene_path:
         scene_ply = Path(scene_path)
@@ -296,9 +301,10 @@ def main(data_path, scene_path, objects_path, checkpoint_path, mode, host, port,
     else:
         cap_th = None
         pred_th = None
-
+    PHYS_STEPS_PER_FRAME = 2
     while not splatviz.should_close():
-        p.stepSimulation()
+        for _ in range(PHYS_STEPS_PER_FRAME):
+            p.stepSimulation()
         splatviz.sync_dynamic_objects(scene_origin_pos=[0, 0, 0], scene_origin_quat=world_quat)
         if predictor is not None:
             with buf_lock:

@@ -152,6 +152,15 @@ class LoadWidget(Widget):
                     p.applyExternalForce(bid, -1, forward_world * F, com_world, p.WORLD_FRAME)
                     self.called_objects += 1
 
+            # [추가] 클릭해서 배치하는 모드
+            if imgui_utils.button("Insert Object (Click to place)", width=viz.button_w):
+                file_path, obj_path = self.prepare_object_files_for_insertion()
+                if file_path and obj_path:
+                    # 뷰어에게 "다음 왼쪽클릭으로 이 오브젝트를 소환"하도록 의사표시
+                    self.viz.awaiting_spawn_click = True
+                    self.viz.pending_spawn_files = (file_path, obj_path)
+                    print("Click on the viewport to spawn the object (click-to-place mode enabled).")
+
             if len(self.plys) > 1:
                 use_splitscreen, self.use_splitscreen = imgui.checkbox("Splitscreen", self.use_splitscreen)
                 highlight_border, self.highlight_border = imgui.checkbox("Highlight Border", self.highlight_border)
@@ -162,6 +171,36 @@ class LoadWidget(Widget):
         viz.args.current_ply_names = [
             ply.replace("/", "_").replace("\\", "_").replace(":", "_").replace(".", "_") for ply in self.plys
         ]
+
+    def prepare_object_files_for_insertion(self):
+        """
+        클릭-소환을 위해 사용할 (ply 경로, obj 경로)만 '반환'한다.
+        - 여기서는 self.plys에 추가하지 않는다. (실제 소환 성공 시 등록)
+        - 이미 동일 ply가 목록에 있으면 _{N} 접미사로 복사본을 생성해 경로를 반환한다.
+        """
+        import os, shutil
+        base_ply = os.path.abspath("objects/pokeball/point_cloud.ply")
+        obj_path = os.path.abspath("objects/pokeball/obj_vhacd.obj")
+
+        if not os.path.exists(base_ply) or not os.path.exists(obj_path):
+            print("Object files not found in 'objects/pokeball' directory")
+            return None, None
+
+        # 기본 경로가 아직 목록에 없다면 우선 기본 경로 사용
+        if base_ply not in self.plys:
+            return base_ply, obj_path
+
+        # 이미 사용 중이면, _{k} 접미사를 붙여 '목록에 없는' 파일명으로 복사
+        dir_name, file_name = os.path.split(base_ply)
+        base_name, ext = os.path.splitext(file_name)
+        k = int(getattr(self, "called_objects", 0))
+        while True:
+            new_file_name = f"{base_name}_{k}{ext}"
+            candidate = os.path.join(dir_name, new_file_name)
+            if candidate not in self.plys:
+                shutil.copyfile(base_ply, candidate)
+                return candidate, obj_path
+            k += 1
 
     def list_runs_and_pkls(self) -> list[str]:
         self.items = []

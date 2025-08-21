@@ -94,6 +94,11 @@ class EditWidget(Widget):
         self._cur_name_slider = self.var_names[self.var_name_index]
         self._cur_preset_name = ""
         self._global_scale = 0.0
+        # --- scale 애니메이션 상태 (프레임당 증감) ---
+        self._scale_animating = False  # 애니메이션 on/off
+        self._scale_target = None  # 목표 scale 값 (예: 3.0 또는 0.0)
+        self._scale_step = 0.05  # 프레임당 증감량 (원하는 값으로 조절)
+        self._scale_minmax = (-5.0, 5.0)  # Global Scale 슬라이더와 동일한 범위
 
     def setup_editor(self):
         language = edit.TextEditor.LanguageDefinition.python()
@@ -178,6 +183,22 @@ class EditWidget(Widget):
                 save_json(filename=self.history_path, data=self.history)
             self.last_text = edit_text
 
+        # [추가] 매 프레임 Global Scale 애니메이션 업데이트
+        if self._scale_animating and (self._scale_target is not None):
+            lo, hi = self._scale_minmax
+            # 목표까지 남은 거리
+            delta = float(self._scale_target) - float(self._global_scale)
+            if abs(delta) <= self._scale_step:
+                # 도달: 스냅 & 정지
+                self._global_scale = float(self._scale_target)
+                self._scale_animating = False
+                self._scale_target = None
+            else:
+                # 한 프레임 전진
+                step = self._scale_step if delta > 0 else -self._scale_step
+                self._global_scale += step
+                # 슬라이더 범위로 클램프
+                self._global_scale = max(lo, min(hi, self._global_scale))
         viz.args.edit_text = self.last_text
         viz.args.slider = {slider.key: slider.value for slider in self.sliders}
         viz.args.slider["scale"] = self._global_scale
@@ -243,6 +264,35 @@ class EditWidget(Widget):
             _changed, self._global_scale = imgui.slider_float(
                 "##global_scale",  # ID
                 self._global_scale,  # 현재 값
-                -5.0, 5.0,  # 범위
+                0.0, 3.0,  # 범위
                 format="%.2f",
             )
+            # [추가] Global Scale 애니메이션 컨트롤
+            if imgui_utils.button("Animate → 3", width=self.viz.button_w):
+                self._scale_target = 3.0
+                self._scale_animating = True
+
+            imgui.same_line()
+            if imgui_utils.button("Animate → 0", width=self.viz.button_w):
+                self._scale_target = 0.0
+                self._scale_animating = True
+
+            imgui.same_line()
+            if imgui_utils.button("Stop", width=int(self.viz.button_w * 0.8)):
+                self._scale_animating = False
+                self._scale_target = None
+
+            # step 입력(프레임당 증감량)
+            imgui.same_line()
+            label("step/frame")
+            with imgui_utils.item_width(int(self.viz.pane_w * 0.12)):
+                _chg, self._scale_step = imgui.input_float("##scale_step", self._scale_step, 0.01, 0.1, format="%.3f")
+                # 안전장치: 음수/너무 큰 값 방지
+                if self._scale_step < 0:
+                    self._scale_step = -self._scale_step
+                if self._scale_step > 1.0:
+                    self._scale_step = 1.0
+
+            # 상태 표시
+            if self._scale_animating:
+                imgui.text(f"Animating to {self._scale_target:.2f} (now {self._global_scale:.2f})")
