@@ -74,6 +74,11 @@ class CameraSequenceWidget(Widget):
         if show:
             imgui.text("Save and Playback Camera Poses")
             # 현재 카메라 저장 버튼
+            if imgui.button("Save Poses"):
+                self.save_poses()
+            imgui.same_line()
+            if imgui.button("Load Poses"):
+                self.load_poses()
             if imgui_utils.button("Save Current Camera", width=viz.button_w):
                 cam_widget = None
                 for w in viz.widgets:
@@ -182,6 +187,8 @@ class CameraSequenceWidget(Widget):
                             self.transition_times.insert(idx-1, 2.0)
                             self.transition_frames.insert(idx-1, 60)
                     break
+
+
             # 두 개 이상의 카메라 포즈가 있을 때만 재생 기능 UI 표시
             if len(self.saved_cameras) > 1:
                 imgui.separator()
@@ -302,6 +309,115 @@ class CameraSequenceWidget(Widget):
                     self._stop_playback(viz)
 
             # ─────────────────── 보조 메서드 일부 발췌 ───────────────────
+
+    def save_poses(self):
+        """Save current camera pose sequence to a JSON file (readable)."""
+        import json, os, time
+        import numpy as np
+        import torch
+
+        # 저장할 파일명 (cameras.json과 충돌 피함)
+        file_path = "camera_poses.json"
+
+        if len(self.saved_cameras) == 0:
+            print("[camera-seq] No saved cameras to export.")
+            return
+
+        def _to_list(x):
+            if isinstance(x, torch.Tensor):
+                return x.detach().cpu().tolist()
+            if isinstance(x, np.ndarray):
+                return x.tolist()
+            return x
+
+        data = {
+            "version": 1,
+            "saved_at": time.strftime("%Y-%m-%d %H:%M:%S"),
+            "count": len(self.saved_cameras),
+            "transitions": {
+                "times": [float(t) for t in self.transition_times],
+                "frames": [int(f) for f in self.transition_frames],
+            },
+            "cameras": [],
+        }
+
+        for cam in self.saved_cameras:
+            entry = {
+                "name": cam.name,
+                "mode": cam.mode,
+                "yaw": float(cam.yaw),
+                "pitch": float(cam.pitch),
+                "radius": float(cam.radius),
+                "fov": float(getattr(cam, "fov", 60.0)),
+                "up_vector": _to_list(cam.up_vector),
+                "cam_pos": _to_list(cam.cam_pos),
+                "forward": _to_list(cam.forward),
+                "lookat_point": _to_list(cam.lookat_point),
+                "cam_params": _to_list(cam.cam_params),
+            }
+            data["cameras"].append(entry)
+
+        with open(file_path, "w") as f:
+            json.dump(data, f, indent=2)
+        print(f"[camera-seq] Saved {len(self.saved_cameras)} camera poses to {file_path}")
+
+    def load_poses(self):
+        """Load camera pose sequence from a JSON file created by save_poses()."""
+        import json, os, torch, numpy as np
+
+        file_path = "camera_poses.json"
+        if not os.path.exists(file_path):
+            print(f"[camera-seq] Pose file '{file_path}' not found.")
+            return
+
+        with open(file_path, "r") as f:
+            data = json.load(f)
+
+        cams = data.get("cameras", [])
+        if len(cams) == 0:
+            print(f"[camera-seq] No cameras in '{file_path}'.")
+            return
+
+        # CamWidget의 device를 맞춰서 텐서 재생성
+        cam_widget = next((w for w in self.viz.widgets
+                           if hasattr(w, "device") and hasattr(w, "cam_params")), None)
+        device = getattr(cam_widget, "device", "cuda")
+
+        self.saved_cameras.clear()
+        for i, d in enumerate(cams):
+            cam = EasyDict()
+            cam.name = d.get("name", f"Camera {i + 1}")
+            cam.mode = d.get("mode", "WASD")
+            cam.yaw = float(d.get("yaw", 0.0))
+            cam.pitch = float(d.get("pitch", 0.0))
+            cam.radius = float(d.get("radius", 1.0))
+            cam.fov = float(d.get("fov", 60.0))
+
+            # 리스트 → 텐서
+            def _to_tensor(x):
+                return torch.tensor(x, dtype=torch.float32, device=device)
+
+            cam.up_vector = _to_tensor(d.get("up_vector", [0.0, 1.0, 0.0]))
+            cam.cam_pos = _to_tensor(d.get("cam_pos", [0.0, 0.0, -1.0]))
+            cam.forward = _to_tensor(d.get("forward", [0.0, 0.0, 1.0]))
+            cam.lookat_point = _to_tensor(d.get("lookat_point", [0.0, 0.0, 0.0]))
+
+            cam_params = d.get("cam_params", np.eye(4, dtype=np.float32).tolist())
+            cam.cam_params = _to_tensor(cam_params)
+
+            self.saved_cameras.append(cam)
+
+        # 전환 정보 복구 (길이 안 맞으면 기본값으로 리셋)
+        times = data.get("transitions", {}).get("times", [])
+        frames = data.get("transitions", {}).get("frames", [])
+        if len(self.saved_cameras) > 1 and len(times) == len(self.saved_cameras) - 1 and len(frames) == len(times):
+            self.transition_times = [float(t) for t in times]
+            self.transition_frames = [int(fr) for fr in frames]
+        else:
+            self.transition_times = [2.0] * max(0, len(self.saved_cameras) - 1)
+            self.transition_frames = [60] * max(0, len(self.saved_cameras) - 1)
+
+        print(f"[camera-seq] Loaded {len(self.saved_cameras)} camera poses from {file_path}")
 
     def _start_segment(self, idx: int):
         """idx 카메라 → idx+1 카메라 보간 준비"""

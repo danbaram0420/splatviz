@@ -36,6 +36,7 @@ from widgets import (
     render,
     training,
 )
+from widgets.load_ply import create_physics_object_from_mesh
 
 def local_delta_link(p_b, q_b, p_i, q_i, p_t, q_t):
     # 현재 링크 자세
@@ -153,6 +154,15 @@ class Splatviz(imgui_window.ImguiWindow):
         self.set_position(0, 0)
         self._adjust_font_size()
         self.skip_frame()
+
+        # [click-to-place] 상태 및 파라미터 (튜닝 지점)
+        self.awaiting_spawn_click = False
+        self.pending_spawn_files = None
+        self.spawn_distance_m = 0.5  # ← 기본 소환 거리(미터). 필요시 조절해도 좋음.
+        self.throw_impulse_newton = 25000.0  # ← '던지는' 느낌의 힘(뉴턴). 필요시 조절.
+
+        if not hasattr(self, "scene_origin_quat"):
+            self.scene_origin_quat = p.getQuaternionFromEuler([math.radians(self.rotation), 0, 0])
 
     def close(self):
         for widget in self.widgets:
@@ -276,6 +286,115 @@ class Splatviz(imgui_window.ImguiWindow):
             self.eval_result = self.result.eval
         else:
             self.eval_result = None
+            # [추가] 클릭-투-플레이스: 뷰포트(렌더 이미지) 클릭 시 스폰
+        try:
+            if getattr(self, "awaiting_spawn_click",False) and "image" in self.result and self._tex_obj is not None:
+                # 렌더 텍스처의 실제 그려진 영역 계산
+                view_w = self.content_width - self.pane_w
+                view_h = self.content_height
+                pos_x, pos_y = pos[0], pos[1]  # draw()에서 사용한 중심좌표
+                tex_w = float(self._tex_obj.width)
+                tex_h = float(self._tex_obj.height)
+                zoom = min(view_w / tex_w, view_h / tex_h)
+                draw_w = tex_w * zoom
+                draw_h = tex_h * zoom
+                left = pos_x - draw_w * 0.5
+                right = pos_x + draw_w * 0.5
+                top = pos_y - draw_h * 0.5
+                bottom = pos_y + draw_h * 0.5
+
+                # 왼쪽 클릭?
+                BTN_LEFT = getattr(imgui.MouseButton_, "left", 0)
+                if imgui.is_mouse_clicked(BTN_LEFT):
+                    mp = imgui.get_mouse_pos()
+                    mx, my = mp.x, mp.y  # ImVec2 대응 (언패킹 대신 속성 접근이 안전)
+                    # 렌더 이미지 영역 안쪽 클릭만 허용
+                    if left <= mx <= right and top <= my <= bottom:
+                        # 1) 화면좌표 → NDC(-1~1)
+                        u = (mx - left) / draw_w
+                        v = (my - top) / draw_h
+                        nx = 2.0 * u - 1.0
+                        ny = 1.0 - 2.0 * v  # y 반전
+
+                        # 2) 카메라 공간 레이 계산 (수직 FOV 사용)
+                        cam_widget = self.widgets[1]  # Load 위젯 다음이 Camera 위젯
+                        fov_y_deg = getattr(cam_widget, "fov", 60.0)  # 기본 60도로 폴백
+                        fov_y = np.deg2rad(float(fov_y_deg))
+                        aspect = draw_w / max(1.0, draw_h)
+                        tan_ = np.tan(fov_y * 0.5)
+
+                        # 카메라 기준(-Z 전방) 방향
+                        dir_cam = np.array([nx * aspect * tan_, ny * tan_, -1.0], dtype=np.float64)
+                        dir_cam /= np.linalg.norm(dir_cam) + 1e-9
+
+                        # 3) 카메라 월드(뷰어) 공간으로 변환
+                        # cam_widget.forward/up은 torch 텐서일 가능성 → numpy로
+                        fwd = getattr(cam_widget, "forward", None)
+                        upv = getattr(cam_widget, "up", None)
+                        if fwd is None:
+                            raise RuntimeError("Camera widget has no 'forward' vector.")
+                        fwd = fwd.detach().cpu().numpy().astype(np.float64)
+                        fwd /= np.linalg.norm(fwd) + 1e-9
+
+                        if upv is None:
+                            upv = np.array([0.0, 1.0, 0.0], dtype=np.float64)
+                        else:
+                            upv = upv.detach().cpu().numpy().astype(np.float64)
+                        # right, up을 오른손 좌표계로 재구성 (좌우 반전 해결)
+                        right_w = np.cross(upv, fwd)
+                        right_w /= np.linalg.norm(right_w) + 1e-9
+                        up_w = np.cross(fwd, right_w)
+                        up_w /= np.linalg.norm(up_w) + 1e-9
+
+                        # 카메라 공간(-Z 전방)을 월드로 맵핑 (중앙 클릭: dir_world == fwd)
+                        dir_world = (right_w * dir_cam[0] +up_w * dir_cam[1] +fwd * (-dir_cam[2]))
+                        dir_world /= np.linalg.norm(dir_world) + 1e-9
+
+                        # 카메라 위치(월드)
+                        cam_pos = getattr(cam_widget, "cam_pos", None)
+                        if cam_pos is None:
+                            raise RuntimeError("Camera widget has no 'cam_pos'.")
+                        cam_pos = cam_pos.detach().cpu().numpy().astype(np.float64)
+
+                        # 4) 뷰어→Bullet 월드로 회전 적용 (장면 전역 회전과 일치)
+                        if not hasattr(self, "scene_origin_quat"):
+                            # 혹시 초기화가 안 된 경우의 안전장치: 프로젝트에서 쓰는 기본 고정값으로 대체
+                            # (예: 원래 쓰던 210도 X-회전. 실제 값은 프로젝트와 동일하게 맞추세요)
+                            self.scene_origin_quat = p.getQuaternionFromEuler([math.radians(self.rotation), 0, 0])
+                        Rg = R.from_quat(self.scene_origin_quat)
+                        dir_bullet = Rg.apply(dir_world)
+                        cam_bullet = Rg.apply(cam_pos)
+
+                        # 5) 스폰 위치 = 카메라에서 dir로 spawn_distance_m 전방
+                        spawn_pos_world = cam_bullet + dir_bullet * float(self.spawn_distance_m)
+
+                        # 6) 준비된 파일로 실제 오브젝트 생성 + 던지기
+                        if getattr(self, "pending_spawn_files", None) is None:
+                            print("[click-to-place] pending files missing.")
+                        else:
+                            file_path, obj_path = self.pending_spawn_files
+                            bid, com, quat_I = create_physics_object_from_mesh(obj_path, self.scene_origin_quat,
+                                                                                   spawn_pos_world)
+
+                            # 렌더러에 등록(초기 pose 지정)
+                            self.register_dynamic_object(file_path, bid, com, quat_I,init_world_pos=spawn_pos_world,init_world_quat=self.scene_origin_quat)
+
+                            # impulse(던지기): dir_bullet 방향으로 힘 가하기
+                            F = float(getattr(self, "throw_impulse_newton", 10000.0))
+                            com_world = spawn_pos_world + Rg.apply(com)
+                            p.applyExternalForce(bid, -1, (dir_bullet * F).tolist(), com_world.tolist(),p.WORLD_FRAME)
+                            try:
+                                self.widgets[0].called_objects += 1
+                            except Exception:
+                                pass
+
+                        # 상태 리셋
+                        self.awaiting_spawn_click = False
+                        self.pending_spawn_files = None
+        except Exception as e:
+            print("[click-to-place] error:", e)
+            self.awaiting_spawn_click = False
+            self.pending_spawn_files = None
 
         # End frame.
         self._adjust_font_size()
@@ -292,6 +411,8 @@ class Splatviz(imgui_window.ImguiWindow):
         # 파일이 막 로드되지 않았다면, 파일리스트에 강제로 삽입
         if abs_path not in self.widgets[0].plys:
             self.widgets[0].plys.append(abs_path)
+
+        self.scene_origin_quat = init_world_quat
 
         # 처음 한 프레임이라도 곧바로 올바른 위치에 보이도록
         rel_pos, rel_quat = local_delta_link(
