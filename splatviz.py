@@ -89,6 +89,7 @@ class Splatviz(imgui_window.ImguiWindow):
 
         self.widgets = []
         self.rotation = rotation
+        self.scene_path = scene_path
         update_all_the_time = True
         if mode == "default":
             # Pass initial_files to LoadWidget if provided
@@ -183,6 +184,12 @@ class Splatviz(imgui_window.ImguiWindow):
         self.last_spawned_bullet_id = None
 
         self.bullet_to_path = {}
+
+        self.traj_snapshots = []  # 학습 중 스냅샷 [(N×3 pts, rgba[4]), ...]
+
+        # ✨ 추가: 세션 카운터 & 마지막 소환의 세션
+        self.spawn_session_id = 0
+        self.last_spawn_session_id = -1
 
     def close(self):
         for widget in self.widgets:
@@ -404,6 +411,15 @@ class Splatviz(imgui_window.ImguiWindow):
                     if len(self.traj_pred) > 1:
                         draw_polyline(self.traj_pred, (255, 0, 0, 255), thickness=2.0,
                                       step=max(1, self.traj_downsample))
+                    snaps = getattr(self, "traj_snapshots", [])
+                    for pts, rgba in snaps:
+                        # snapshot_cb는 [0..1] float RGBA를 보냄 → 0..255 정수로 변환
+                        if max(rgba) <= 1.0:
+                            col = tuple(int(round(c * 255)) for c in rgba)
+                        else:
+                            col = tuple(int(c) for c in rgba)
+                        # 살짝 얇게, 다운샘플은 GT/Pred와 동일하게
+                        draw_polyline(pts, col, thickness=1.5, step=max(1, self.traj_downsample))
 
         except Exception as e:
             print("[trajectory overlay] error:", e)
@@ -504,6 +520,10 @@ class Splatviz(imgui_window.ImguiWindow):
                                                          init_world_quat=self.scene_origin_quat,
                                                          obj_path=obj_path)
 
+                            # ✨ 추가: 소환 완료 이벤트에 세션을 남김
+                            self.last_spawned_bullet_id = bid
+                            self.last_spawn_session_id = self.spawn_session_id
+
                             # impulse(던지기): dir_bullet 방향으로 힘 가하기
                             F = float(getattr(self, "throw_impulse_newton", 10000.0))
                             com_world = spawn_pos_world + Rg.apply(com)
@@ -549,7 +569,10 @@ class Splatviz(imgui_window.ImguiWindow):
             init_world_pos, init_world_quat)
         idx = self.widgets[0].plys.index(abs_path)
         self.set_transform(idx, rel_quat, rel_pos)
-        self.last_spawned_bullet_id = bullet_id
+        # 클릭-소환 모드일 때만 '마지막 소환' 훅을 갱신 (초기 로딩 등은 무시)
+        if getattr(self, "awaiting_spawn_click", False):
+            self.last_spawned_bullet_id = bullet_id
+            self.last_spawn_session_id = self.spawn_session_id
 
     def remove_dynamic_object_by_bid(self, bid: int, remove_ply: bool = True):
         """Bullet 바디와 Gaussian(=ply 항목)을 함께 제거하고 모든 맵/상태를 정리한다."""

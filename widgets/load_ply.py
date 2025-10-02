@@ -12,7 +12,40 @@ from trimesh.transformations import quaternion_from_matrix
 from scipy.spatial.transform import Rotation as R
 import shutil
 
-def create_physics_object_from_mesh(obj_path, global_quat, spawn_pos):
+# ---------------------------------------------------------------------
+# Launch settings (impulse -> initial velocity)
+# ---------------------------------------------------------------------
+LAUNCH_SPEED = 3.0      # forward component [m/s]
+LAUNCH_UP    = 0.0      # upward component  [m/s]
+LAUNCH_SPIN  = 0.0      # spin around z     [rad/s]
+
+FREEFALL_LIFT_EPS   = 0.0  # lift after spawn to avoid immediate contact [m]
+FREEFALL_MAX_ADJUST = 0      # additional 1cm lifts at most this many times
+SETTLE_STEPS        = 0     # settle a couple of steps before recording
+
+def ensure_freefall(bid, lift_eps: float = FREEFALL_LIFT_EPS, max_adjust: int = FREEFALL_MAX_ADJUST) -> None:
+    """스폰 직후 바로 접촉 반응이 섞이지 않도록 살짝 띄우고 필요하면 몇 번 더 올려 freefall 상태 보장."""
+    pos, orn = p.getBasePositionAndOrientation(bid)
+    p.resetBasePositionAndOrientation(bid, (pos[0], pos[1], pos[2] + float(lift_eps)), orn)
+    for _ in range(int(max_adjust)):
+        if p.getContactPoints(bodyA=bid):
+            pos, orn = p.getBasePositionAndOrientation(bid)
+            p.resetBasePositionAndOrientation(bid, (pos[0], pos[1], pos[2] + 0.01), orn)
+            p.stepSimulation()
+        else:
+            break
+
+def apply_initial_velocity(bid, v_linear, v_angular=(0.0, 0.0, 0.0), settle_steps: int = SETTLE_STEPS) -> None:
+    """임펄스/외력 대신 초기 속도를 직접 지정하고, 숫자 안정화를 위해 몇 스텝 진행."""
+    p.resetBaseVelocity(bid, linearVelocity=v_linear, angularVelocity=v_angular)
+    for _ in range(int(settle_steps)):
+        p.stepSimulation()
+
+def _kw_cid(cid):
+    """physicsClientId 가 None 이면 빈 dict, 아니면 해당 키워드 인자를 돌려준다."""
+    return {} if cid is None else {"physicsClientId": cid}
+
+def create_physics_object_from_mesh(obj_path, global_quat, spawn_pos, physicsClientId=None):
     """
     obj_path          : *.obj (아무 이름이나 OK)
     global_quat       : scene 전역 회전 (w,x,y,z)
@@ -46,17 +79,19 @@ def create_physics_object_from_mesh(obj_path, global_quat, spawn_pos):
     # 4) Bullet shape/바디 생성 ------------------------------
     #    동적(질량>0) → concave flag 절대 사용 X
     flag = 0
-    cid  = p.createCollisionShape(p.GEOM_MESH, fileName=convex, flags=flag)
-    vid  = p.createVisualShape   (p.GEOM_MESH, fileName=obj_path)
+    cid = p.createCollisionShape(p.GEOM_MESH, fileName=convex, flags=flag, **_kw_cid(physicsClientId))
+    vid = p.createVisualShape(p.GEOM_MESH, fileName=obj_path, **_kw_cid(physicsClientId))
 
-
-    bid  = p.createMultiBody(baseMass=20.0,
-                             baseCollisionShapeIndex=cid,
-                             baseVisualShapeIndex=vid,
-                             basePosition=spawn_pos.tolist(),
-                             baseOrientation=global_quat,
-                             baseInertialFramePosition=com.tolist(),
-                             baseInertialFrameOrientation=quat_I)
+    bid = p.createMultiBody(
+        baseMass=20.0,
+        baseCollisionShapeIndex=cid,
+        baseVisualShapeIndex=vid,
+        basePosition=spawn_pos.tolist(),
+        baseOrientation=global_quat,
+        baseInertialFramePosition=com.tolist(),
+        baseInertialFrameOrientation=quat_I,
+        **_kw_cid(physicsClientId)  # ★ 여기도
+    )
     return bid, com, quat_I
 
 class LoadWidget(Widget):
@@ -146,11 +181,14 @@ class LoadWidget(Widget):
                                                      init_world_pos=spawn_pos_world,
                                                      init_world_quat=global_quat,
                                                      obj_path=obj_path)
-                    # 물체에 전방(force) 힘 가하여 살짝 밀기 (물체 초기화면에서 보이도록)
+                    # 초기 속도를 직접 부여(임펄스/외력 사용 X)
                     forward_world = R.from_quat(global_quat).apply(forward)
-                    F = 10000.0  # 힘의 세기
-                    com_world = spawn_pos_world + R.from_quat(global_quat).apply(com)
-                    p.applyExternalForce(bid, -1, forward_world * F, com_world, p.WORLD_FRAME)
+                    fwd_unit = forward_world / (np.linalg.norm(forward_world) + 1e-9)
+                    v0 = (fwd_unit * LAUNCH_SPEED) + np.array([0.0, 0.0, LAUNCH_UP], dtype=np.float32)
+
+                    ensure_freefall(bid)  # 스폰 직후 접촉 반응 제거
+                    apply_initial_velocity(bid, v0.tolist(), (0.0, 0.0, LAUNCH_SPIN))  # 초기 속도/스핀 직접 지정
+
                     self.called_objects += 1
 
             # [추가] 클릭해서 배치하는 모드
